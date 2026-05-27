@@ -7,6 +7,7 @@
     <string name="prompt_hint">Ask what to read, inspect, or decide</string>
     <string name="pick_image">Pick Image</string>
     <string name="capture_photo">Capture Photo</string>
+    <string name="voice_prompt">Voice Prompt</string>
     <string name="quick_read">Quick Read</string>
     <string name="analyze_scene">Analyze</string>
     <string name="captured_photo_label">Captured live from camera</string>
@@ -20,6 +21,8 @@
     <string name="status_streaming">Streaming session %1$s</string>
     <string name="status_loading_run_detail">Loading run detail…</string>
     <string name="status_resolving_approval">Resolving approval…</string>
+    <string name="status_listening">Listening for a spoken prompt…</string>
+    <string name="status_voice_prompt_ready">Voice prompt inserted. Review it or tap Analyze.</string>
     <string name="final_answer_label">Final Answer</string>
     <string name="waiting_summary">Your final answer will appear here and be read aloud.</string>
     <string name="docs_title">Document Search</string>
@@ -39,4 +42,7 @@
     <string name="default_prompt">Inspect this scene and tell me what I should do next.</string>
     <string name="quick_read_prompt">Read the visible text and summarize the key instructions.</string>
     <string name="backend_url">Backend: %1$s</string>
+    <string name="voice_prompt_hint">Speak what to read, inspect, or decide</string>
+    <string name="voice_prompt_missing">No speech recognizer is available on this device.</string>
+    <string name="voice_prompt_empty">No voice prompt was captured.</string>
 </resources>

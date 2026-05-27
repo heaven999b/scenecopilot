@@ -1,8 +1,11 @@
 package com.scenecopilot.app;
 
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.speech.RecognizerIntent;
 import android.speech.tts.TextToSpeech;
 import android.view.View;
 import android.webkit.MimeTypeMap;
@@ -31,6 +34,7 @@ import com.scenecopilot.app.ui.EventAdapter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,6 +80,23 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 binding.selectedFileLabel.setText(getString(R.string.captured_photo_label));
             });
 
+    private final ActivityResultLauncher<Intent> voicePromptLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() != RESULT_OK || result.getData() == null) {
+                    binding.statusText.setText(R.string.voice_prompt_empty);
+                    return;
+                }
+                ArrayList<String> matches = result.getData()
+                        .getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+                if (matches == null || matches.isEmpty()) {
+                    binding.statusText.setText(R.string.voice_prompt_empty);
+                    return;
+                }
+                String spokenPrompt = matches.get(0);
+                binding.promptInput.setText(spokenPrompt);
+                binding.statusText.setText(R.string.status_voice_prompt_ready);
+            });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -97,6 +118,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         binding.capturePhotoButton.setOnClickListener(v -> cameraCapture.launch(null));
         binding.quickReadButton.setOnClickListener(v ->
                 binding.promptInput.setText(getString(R.string.quick_read_prompt)));
+        binding.voicePromptButton.setOnClickListener(v -> launchVoicePrompt());
         binding.analyzeButton.setOnClickListener(v -> submitCurrentRequest());
         binding.searchDocsButton.setOnClickListener(v -> searchDocuments());
         binding.refreshRunButton.setOnClickListener(v -> {
@@ -149,6 +171,19 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             uploadImage(prompt);
         } else {
             postTextChat(prompt);
+        }
+    }
+
+    private void launchVoicePrompt() {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault());
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, getString(R.string.voice_prompt_hint));
+        try {
+            binding.statusText.setText(R.string.status_listening);
+            voicePromptLauncher.launch(intent);
+        } catch (ActivityNotFoundException ex) {
+            showError(getString(R.string.voice_prompt_missing));
         }
     }
 

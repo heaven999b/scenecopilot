@@ -119,6 +119,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 
 - direct camera capture
 - gallery image submission
+- voice prompt input through the system speech recognizer
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search
