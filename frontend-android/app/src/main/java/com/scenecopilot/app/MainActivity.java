@@ -5,6 +5,8 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Bundle;
@@ -47,6 +49,7 @@ import com.scenecopilot.app.ui.EventAdapter;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
@@ -73,6 +76,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
     private static final int AUDIO_UPLOAD_CHUNK_BYTES = 192 * 1024;
+    private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
+    private static final int AUDIO_CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
+    private static final int AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT;
 
     private ActivityMainBinding binding;
     private SceneCopilotService service;
@@ -96,9 +102,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
     private long liveCaptureStartedAtMs;
     private long liveCaptureDeadlineAtMs;
-    private MediaRecorder audioRecorder;
+    private AudioRecord audioRecorder;
     private File pendingAudioFile;
     private boolean audioRecordingActive;
+    private boolean audioRecordingStopRequested;
+    private Thread audioCaptureThread;
 
     private final Runnable liveCaptureRunnable = new Runnable() {
         @Override
@@ -317,18 +325,32 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void startAudioRecording() {
-        pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".m4a");
-        audioRecorder = new MediaRecorder();
+        int minBufferSize = AudioRecord.getMinBufferSize(
+                AUDIO_SAMPLE_RATE_HZ,
+                AUDIO_CHANNEL_CONFIG,
+                AUDIO_ENCODING
+        );
+        if (minBufferSize <= 0) {
+            showError(getString(R.string.status_audio_recording_failed));
+            return;
+        }
+        int bufferSize = Math.max(minBufferSize * 2, AUDIO_UPLOAD_CHUNK_BYTES / 2);
+        pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".pcm");
         try {
-            audioRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
-            audioRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-            audioRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
-            audioRecorder.setAudioSamplingRate(16000);
-            audioRecorder.setAudioEncodingBitRate(64000);
-            audioRecorder.setOutputFile(pendingAudioFile.getAbsolutePath());
-            audioRecorder.prepare();
-            audioRecorder.start();
+            audioRecorder = new AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    AUDIO_SAMPLE_RATE_HZ,
+                    AUDIO_CHANNEL_CONFIG,
+                    AUDIO_ENCODING,
+                    bufferSize
+            );
+            if (audioRecorder.getState() != AudioRecord.STATE_INITIALIZED) {
+                throw new IllegalStateException("AudioRecord failed to initialize");
+            }
+            audioRecordingStopRequested = false;
+            audioRecorder.startRecording();
             audioRecordingActive = true;
+            startAudioCaptureThread(bufferSize);
             binding.recordAudioButton.setText(R.string.stop_recording);
             binding.statusText.setText(R.string.status_recording_audio);
             binding.selectedFileLabel.setText(R.string.audio_recorded_label);
@@ -345,6 +367,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         } catch (RuntimeException ignored) {
         } finally {
+            audioRecordingStopRequested = true;
+            joinAudioCaptureThread();
             releaseAudioRecorder();
         }
 
@@ -364,7 +388,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
                 ? currentSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
-        uploadAudioFileInChunks(prompt, pendingAudioFile, sessionId);
+        uploadAudioFileInChunks(prompt, pendingAudioFile, sessionId, ".wav", "pcm16le_mono_16000");
     }
 
     private void cancelAudioRecording() {
@@ -374,6 +398,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         } catch (RuntimeException ignored) {
         } finally {
+            audioRecordingStopRequested = true;
+            joinAudioCaptureThread();
             releaseAudioRecorder();
         }
         if (pendingAudioFile != null && pendingAudioFile.exists()) {
@@ -386,9 +412,38 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void releaseAudioRecorder() {
         audioRecordingActive = false;
         if (audioRecorder != null) {
-            audioRecorder.reset();
             audioRecorder.release();
             audioRecorder = null;
+        }
+    }
+
+    private void startAudioCaptureThread(int bufferSize) {
+        audioCaptureThread = new Thread(() -> {
+            byte[] buffer = new byte[bufferSize];
+            try (FileOutputStream outputStream = new FileOutputStream(pendingAudioFile, false)) {
+                while (!audioRecordingStopRequested && audioRecorder != null) {
+                    int read = audioRecorder.read(buffer, 0, buffer.length);
+                    if (read > 0) {
+                        outputStream.write(buffer, 0, read);
+                    }
+                }
+                outputStream.flush();
+            } catch (IOException ignored) {
+            }
+        }, "scenecopilot-audio-capture");
+        audioCaptureThread.start();
+    }
+
+    private void joinAudioCaptureThread() {
+        if (audioCaptureThread == null) {
+            return;
+        }
+        try {
+            audioCaptureThread.join(1500L);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } finally {
+            audioCaptureThread = null;
         }
     }
 
@@ -701,7 +756,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         });
     }
 
-    private void uploadAudioFileInChunks(String prompt, File audioFile, String sessionId) {
+    private void uploadAudioFileInChunks(
+            String prompt,
+            File audioFile,
+            String sessionId,
+            String audioExt,
+            String audioFormat
+    ) {
         long totalBytes = audioFile.length();
         if (totalBytes <= 0) {
             binding.statusText.setText(R.string.status_audio_recording_failed);
@@ -710,7 +771,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         int totalChunks = (int) ((totalBytes + AUDIO_UPLOAD_CHUNK_BYTES - 1) / AUDIO_UPLOAD_CHUNK_BYTES);
         String uploadId = UUID.randomUUID().toString().substring(0, 12);
-        uploadNextAudioChunk(prompt, audioFile, sessionId, uploadId, 0, totalChunks);
+        uploadNextAudioChunk(prompt, audioFile, sessionId, uploadId, 0, totalChunks, audioExt, audioFormat);
     }
 
     private void uploadNextAudioChunk(
@@ -719,7 +780,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             String sessionId,
             String uploadId,
             int chunkIndex,
-            int totalChunks
+            int totalChunks,
+            String audioExt,
+            String audioFormat
     ) {
         byte[] payload;
         try {
@@ -737,7 +800,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         RequestBody uploadIdBody = RequestBody.create(uploadId, MediaType.parse("text/plain"));
         RequestBody chunkIndexBody = RequestBody.create(String.valueOf(chunkIndex), MediaType.parse("text/plain"));
         RequestBody finalChunkBody = RequestBody.create(String.valueOf(finalChunk), MediaType.parse("text/plain"));
-        RequestBody audioExtBody = RequestBody.create(".m4a", MediaType.parse("text/plain"));
+        RequestBody audioExtBody = RequestBody.create(audioExt, MediaType.parse("text/plain"));
+        RequestBody audioFormatBody = RequestBody.create(audioFormat, MediaType.parse("text/plain"));
 
         binding.statusText.setText(getString(R.string.status_audio_chunk_uploading, chunkIndex + 1, totalChunks));
         service.uploadAudioChunk(
@@ -747,7 +811,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 uploadIdBody,
                 chunkIndexBody,
                 finalChunkBody,
-                audioExtBody
+                audioExtBody,
+                audioFormatBody
         ).enqueue(new Callback<AudioChunkUploadResponse>() {
             @Override
             public void onResponse(@NonNull Call<AudioChunkUploadResponse> call, @NonNull Response<AudioChunkUploadResponse> response) {
@@ -759,7 +824,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 AudioChunkUploadResponse body = response.body();
                 currentSessionId = body.sessionId;
                 if (!body.finalized) {
-                    uploadNextAudioChunk(prompt, audioFile, body.sessionId, uploadId, chunkIndex + 1, totalChunks);
+                    uploadNextAudioChunk(
+                            prompt,
+                            audioFile,
+                            body.sessionId,
+                            uploadId,
+                            chunkIndex + 1,
+                            totalChunks,
+                            audioExt,
+                            audioFormat
+                    );
                     return;
                 }
                 binding.recordAudioButton.setText(R.string.record_audio);

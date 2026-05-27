@@ -29,6 +29,11 @@ _ALLOWED_AUDIO_SUFFIXES = {
     ".mpga",
 }
 
+_ALLOWED_AUDIO_FORMATS = {
+    "binary",
+    "pcm16le_mono_16000",
+}
+
 
 def _validated_audio_ext(value: str) -> str:
     ext = value.strip().lower()
@@ -39,7 +44,14 @@ def _validated_audio_ext(value: str) -> str:
     return ext
 
 
-def _assemble_chunked_audio(*, upload_id: str, audio_ext: str, final_chunk_index: int) -> Path:
+def _validated_audio_format(value: str) -> str:
+    audio_format = value.strip().lower()
+    if audio_format not in _ALLOWED_AUDIO_FORMATS:
+        raise HTTPException(status_code=400, detail="Unsupported audio format descriptor")
+    return audio_format
+
+
+def _assemble_chunked_audio(*, upload_id: str, audio_ext: str, final_chunk_index: int, audio_format: str) -> Path:
     chunk_dir = AUDIO_CHUNK_DIR / upload_id
     if not chunk_dir.exists():
         raise HTTPException(status_code=404, detail="Audio upload session not found")
@@ -56,11 +68,41 @@ def _assemble_chunked_audio(*, upload_id: str, audio_ext: str, final_chunk_index
 
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     assembled = UPLOADS_DIR / f"{upload_id}{audio_ext}"
+    combined = bytearray()
+    for part in part_paths:
+        combined.extend(part.read_bytes())
     with assembled.open("wb") as output:
-        for part in part_paths:
-            output.write(part.read_bytes())
+        if audio_format == "pcm16le_mono_16000":
+            if audio_ext != ".wav":
+                raise HTTPException(status_code=400, detail="pcm16le_mono_16000 chunks must assemble into .wav")
+            output.write(_wav_wrap(bytes(combined), sample_rate=16000, channels=1, bits_per_sample=16))
+        else:
+            output.write(combined)
     shutil.rmtree(chunk_dir, ignore_errors=True)
     return assembled
+
+
+def _wav_wrap(payload: bytes, *, sample_rate: int, channels: int, bits_per_sample: int) -> bytes:
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(payload)
+    riff_size = 36 + data_size
+    header = (
+        b"RIFF"
+        + riff_size.to_bytes(4, "little")
+        + b"WAVE"
+        + b"fmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + channels.to_bytes(2, "little")
+        + sample_rate.to_bytes(4, "little")
+        + byte_rate.to_bytes(4, "little")
+        + block_align.to_bytes(2, "little")
+        + bits_per_sample.to_bytes(2, "little")
+        + b"data"
+        + data_size.to_bytes(4, "little")
+    )
+    return header + payload
 
 
 @router.post("/analyze", response_model=ChatResponse)
@@ -135,6 +177,7 @@ async def upload_audio_chunk(
     chunk_index: int = Form(...),
     final_chunk: bool = Form(default=False),
     audio_ext: str = Form(default=".m4a"),
+    audio_format: str = Form(default="binary"),
 ) -> AudioChunkUploadResponse:
     if chunk_index < 0:
         raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
@@ -142,6 +185,7 @@ async def upload_audio_chunk(
         raise HTTPException(status_code=400, detail="upload_id is required")
 
     validated_ext = _validated_audio_ext(audio_ext)
+    validated_format = _validated_audio_format(audio_format)
     payload = await read_bounded_bytes(audio)
     chunk_dir = AUDIO_CHUNK_DIR / upload_id
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +207,7 @@ async def upload_audio_chunk(
         upload_id=upload_id,
         audio_ext=validated_ext,
         final_chunk_index=chunk_index,
+        audio_format=validated_format,
     )
     plan = build_default_plan(user_message=prompt, has_audio=True)
     handle = await asyncio.to_thread(
@@ -176,6 +221,7 @@ async def upload_audio_chunk(
             "audio_path": str(stored.resolve()),
             "upload_id": upload_id,
             "chunk_count": chunk_index + 1,
+            "audio_format": validated_format,
         },
         plan=plan,
     )

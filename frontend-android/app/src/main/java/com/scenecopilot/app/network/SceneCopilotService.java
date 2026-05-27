@@ -48,7 +48,8 @@ public interface SceneCopilotService {
             @Part("upload_id") RequestBody uploadId,
             @Part("chunk_index") RequestBody chunkIndex,
             @Part("final_chunk") RequestBody finalChunk,
-            @Part("audio_ext") RequestBody audioExt
+            @Part("audio_ext") RequestBody audioExt,
+            @Part("audio_format") RequestBody audioFormat
     );
 
     @GET("api/documents/search")

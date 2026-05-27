@@ -123,8 +123,8 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - direct camera capture
 - gallery image submission
 - voice prompt input through the system speech recognizer
-- raw audio clip upload to the backend ASR route
-- chunked audio upload protocol for incremental speech ingest
+- AudioRecord-based PCM capture for backend ASR
+- chunked audio upload protocol for incremental speech ingest, including PCM16 capture assembled into WAV on the backend
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search
