@@ -18,14 +18,17 @@ Wearable / phone frame
   -> POST /api/scans/analyze
   -> saved under backend/data/uploads/
   -> durable session + run created
-  -> agent tool loop
+  -> planner selects route
+  -> policy gates fast OCR / retrieval / approval behavior
+  -> service pipeline
      -> run_ocr
      -> describe_scene
      -> search_documents
      -> make_decision
      -> save_scene_memory
+  -> approval gate when risk is elevated
   -> reasoning events and run state stored in SQLite
-  -> SSE stream consumed by Android app
+  -> SSE stream consumed by Android app and browser deck
 ```
 
 ## Concurrency and latency notes

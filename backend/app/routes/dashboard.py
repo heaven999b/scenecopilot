@@ -1,15 +1,58 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from ..config import DEMO_USER_ID
+from ..agent import events as event_bus
+from ..config import (
+    DATA_DIR,
+    DECISION_PROVIDER,
+    DEMO_USER_ID,
+    DOC_CHUNK_SIZE,
+    DOC_VECTOR_DIMS,
+    EMBEDDING_PROVIDER,
+    ENABLE_EXTERNAL_SEARCH,
+    EXTERNAL_SEARCH_PROVIDER,
+    OCR_PROVIDER,
+    RETRIEVAL_PROVIDER,
+    SPEECH_PROVIDER,
+    VISION_PROVIDER,
+)
 from ..db import get_conn, row_to_dict
+from ..runtime import scheduler
 from ..services.session_manager import session_manager
 
 router = APIRouter(tags=["dashboard"])
+_LATEST_EVAL_PATH = DATA_DIR / "evals" / "latest_eval.json"
+
+
+def _provider_profile() -> dict[str, object]:
+    mode = "cloud-enhanced" if "anthropic" in {OCR_PROVIDER, VISION_PROVIDER, DECISION_PROVIDER} else "offline-ready"
+    return {
+        "mode": mode,
+        "ocr": OCR_PROVIDER,
+        "vision": VISION_PROVIDER,
+        "decision": DECISION_PROVIDER,
+        "speech": SPEECH_PROVIDER,
+        "retrieval": RETRIEVAL_PROVIDER,
+        "embedding": EMBEDDING_PROVIDER,
+        "external_search_enabled": ENABLE_EXTERNAL_SEARCH,
+        "external_search_provider": EXTERNAL_SEARCH_PROVIDER,
+        "chunk_size": DOC_CHUNK_SIZE,
+        "vector_dims": DOC_VECTOR_DIMS,
+    }
+
+
+def _load_latest_eval() -> dict[str, object] | None:
+    if not _LATEST_EVAL_PATH.exists():
+        return None
+    try:
+        return json.loads(_LATEST_EVAL_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
 
 _DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
@@ -50,7 +93,7 @@ _DASHBOARD_HTML = """<!doctype html>
     h2 { font-size: 18px; margin-bottom: 12px; }
     p.meta { color: var(--muted); margin-top: 8px; max-width: 820px; line-height: 1.5; }
     .metrics, .grid { display: grid; gap: 16px; }
-    .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 24px; }
+    .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 24px; }
     .grid { grid-template-columns: 1.1fr 0.9fr; margin-top: 20px; align-items: start; }
     .stack { display: grid; gap: 16px; }
     .panel {
@@ -173,15 +216,17 @@ _DASHBOARD_HTML = """<!doctype html>
   <div class="shell">
     <header>
       <h1>SceneCopilot Control Deck</h1>
-      <p class="meta">A browser workspace for runs, approvals, uploads, retrieval, and live agent telemetry. The Android Java app remains the primary field client, and this deck gives you the thicker control-plane surface that demo-heavy repos usually need.</p>
-      <div class="banner">Tip: launch a text or image run here, then click a run in the right column to open its live SSE stream and detail view.</div>
+      <p class="meta">Operations workspace for field runs, approvals, knowledge ingest, evaluation baselines, and live run forensics. The Android Java app stays focused on capture and response, while this deck carries the control-plane and review surface.</p>
+      <div class="banner">Launch a run, inspect the artifacts and audit trail, then move from analysis to approval without leaving the browser.</div>
     </header>
 
     <section class="metrics">
       <div class="panel metric"><div class="label">Scheduler</div><div class="value" id="metricScheduler">--</div><div class="hint" id="metricSchedulerHint">Pending and active runs</div></div>
       <div class="panel metric"><div class="label">Documents</div><div class="value" id="metricDocs">--</div><div class="hint" id="metricDocsHint">Indexed knowledge base</div></div>
       <div class="panel metric"><div class="label">Action Cards</div><div class="value" id="metricCards">--</div><div class="hint" id="metricCardsHint">Open and historical recommendations</div></div>
+      <div class="panel metric"><div class="label">Pending Approvals</div><div class="value" id="metricApprovals">--</div><div class="hint" id="metricApprovalsHint">Runs waiting on a human decision</div></div>
       <div class="panel metric"><div class="label">Recent Runs</div><div class="value" id="metricRuns">--</div><div class="hint" id="metricRunsHint">Latest execution snapshots</div></div>
+      <div class="panel metric"><div class="label">Eval P95</div><div class="value" id="metricLatency">--</div><div class="hint" id="metricLatencyHint">Last recorded benchmark latency</div></div>
     </section>
 
     <section class="grid">
@@ -215,6 +260,17 @@ _DASHBOARD_HTML = """<!doctype html>
             <button id="refreshAllButton" class="secondary">Refresh Dashboard</button>
           </div>
           <div class="pill" id="launchStatus">Ready</div>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h2>System Profile</h2>
+            <div class="list" id="profileList"></div>
+          </div>
+          <div class="panel">
+            <h2>Evaluation Baseline</h2>
+            <div class="list" id="evalList"></div>
+          </div>
         </div>
 
         <div class="split">
@@ -269,6 +325,11 @@ _DASHBOARD_HTML = """<!doctype html>
 
       <div class="stack">
         <div class="panel">
+          <h2>Pending Approvals</h2>
+          <div class="list" id="approvalQueueList"></div>
+        </div>
+
+        <div class="panel">
           <h2>Recent Runs</h2>
           <div class="list" id="runsList"></div>
         </div>
@@ -292,6 +353,16 @@ _DASHBOARD_HTML = """<!doctype html>
             <div>
               <h3 style="margin-bottom:10px;">Approvals</h3>
               <div class="list" id="approvalsList"></div>
+            </div>
+          </div>
+          <div class="split" style="margin-top:14px;">
+            <div>
+              <h3 style="margin-bottom:10px;">Scene Captures</h3>
+              <div class="list" id="runCapturesList"></div>
+            </div>
+            <div>
+              <h3 style="margin-bottom:10px;">Run Action Cards</h3>
+              <div class="list" id="runCardsList"></div>
             </div>
           </div>
           <div style="margin-top:14px;">
@@ -339,16 +410,52 @@ _DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refreshDashboard() {
-      const [health, state] = await Promise.all([
-        fetchJson('/api/health'),
-        fetchJson('/api/state'),
-      ]);
-      metric('metricScheduler', `${health.scheduler.active_runs}/${health.scheduler.max_concurrent_runs}`, `Pending ${health.scheduler.pending_runs} · submitted ${health.scheduler.submitted_runs}`);
-      metric('metricDocs', String(state.documents.length), 'Latest uploaded and seeded docs');
-      metric('metricCards', String(state.action_cards.length), 'Recent recommended actions');
-      metric('metricRuns', String(state.recent_runs.length), 'Recent run snapshots');
+      const summary = await fetchJson('/api/dashboard/summary');
+      const scheduler = summary.system_metrics.scheduler || {};
+      const evalMetrics = (summary.latest_eval && summary.latest_eval.scenario_metrics) || {};
+      metric('metricScheduler', `${scheduler.active_runs || 0}/${scheduler.max_concurrent_runs || 0}`, `Pending ${scheduler.pending_runs || 0} · rejected ${scheduler.rejected_runs || 0}`);
+      metric('metricDocs', String(summary.counts.documents || 0), `${summary.counts.chunks || 0} indexed chunks`);
+      metric('metricCards', String(summary.counts.action_cards || 0), `${summary.counts.captures || 0} persisted scene captures`);
+      metric('metricApprovals', String(summary.counts.pending_approvals || 0), 'Runs waiting on review');
+      metric('metricRuns', String(summary.recent_runs.length || 0), `Completed ${scheduler.completed_runs || 0} · failed ${scheduler.failed_runs || 0}`);
+      metric('metricLatency', evalMetrics.p95_latency_ms ? `${evalMetrics.p95_latency_ms} ms` : '--', `Avg ${evalMetrics.avg_latency_ms || '--'} ms · OCR ${evalMetrics.ocr_accuracy ?? '--'}`);
 
-      qs('documentsList').innerHTML = listHtml(state.documents, (item) => `
+      qs('profileList').innerHTML = listHtml([
+        { label: 'Runtime profile', value: summary.provider_profile.mode, hint: `OCR ${summary.provider_profile.ocr} · Vision ${summary.provider_profile.vision} · Decision ${summary.provider_profile.decision}` },
+        { label: 'Knowledge path', value: `${summary.provider_profile.retrieval} + ${summary.provider_profile.embedding}`, hint: `${summary.provider_profile.chunk_size} token chunks · ${summary.provider_profile.vector_dims} dims` },
+        { label: 'External search', value: summary.provider_profile.external_search_enabled ? 'enabled' : 'disabled', hint: summary.provider_profile.external_search_enabled ? summary.provider_profile.external_search_provider : 'local-only retrieval' },
+        { label: 'Event bus', value: `${summary.system_metrics.event_bus.session_subscribers} subscribers`, hint: `${summary.system_metrics.event_bus.buffered_events} buffered events` },
+      ], (item) => `
+        <div class="item">
+          <strong>${item.label}</strong>
+          <div>${item.value}</div>
+          <small>${item.hint}</small>
+        </div>
+      `, 'No profile data yet.');
+
+      const latestEval = summary.latest_eval;
+      const evalItems = latestEval ? [
+        { label: 'Generated', value: latestEval.generated_at || 'n/a', hint: `${latestEval.case_count || 0} seeded cases` },
+        { label: 'Retrieval hit rate', value: String(evalMetrics.retrieval_hit_rate ?? '--'), hint: `High-risk miss ${evalMetrics.high_risk_miss_rate ?? '--'}` },
+        { label: 'Fallback success', value: String((latestEval.provider_fallback && latestEval.provider_fallback.success_rate) ?? '--'), hint: `Provider fallback coverage` },
+      ] : [];
+      qs('evalList').innerHTML = listHtml(evalItems, (item) => `
+        <div class="item">
+          <strong>${item.label}</strong>
+          <div>${item.value}</div>
+          <small>${item.hint}</small>
+        </div>
+      `, 'Run `python3 -m app.evals.harness` to record a baseline.');
+
+      qs('approvalQueueList').innerHTML = listHtml(summary.pending_approvals, (item) => `
+        <button class="item secondary" style="text-align:left;" onclick="selectRun('${item.run_id}', '${item.session_id}')">
+          <strong>${item.risk_level} risk · ${item.route_name || 'run'}</strong>
+          <div>${item.reason}</div>
+          <small>${item.recommended_action || item.user_message || 'Awaiting decision'}</small>
+        </button>
+      `, 'No approvals waiting right now.');
+
+      qs('documentsList').innerHTML = listHtml(summary.documents, (item) => `
         <div class="item">
           <strong>${item.title}</strong>
           <div>${item.summary || ''}</div>
@@ -356,7 +463,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       `, 'No documents yet.');
 
-      qs('cardsList').innerHTML = listHtml(state.action_cards, (item) => `
+      qs('cardsList').innerHTML = listHtml(summary.action_cards, (item) => `
         <div class="item">
           <strong>${item.title}</strong>
           <div>${item.detail}</div>
@@ -364,7 +471,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       `, 'No action cards yet.');
 
-      qs('capturesList').innerHTML = listHtml(state.recent_captures, (item) => `
+      qs('capturesList').innerHTML = listHtml(summary.recent_captures, (item) => `
         <div class="item">
           <strong>${item.scene_summary}</strong>
           <div>${item.ocr_text || 'No OCR text saved'}</div>
@@ -372,7 +479,7 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       `, 'No captures yet.');
 
-      qs('runsList').innerHTML = listHtml(state.recent_runs, (item) => `
+      qs('runsList').innerHTML = listHtml(summary.recent_runs, (item) => `
         <button class="item secondary" style="text-align:left;" onclick="selectRun('${item.id}', '${item.session_id}')">
           <strong>${item.route_name || 'run'} · ${item.status}</strong>
           <div>${item.user_message}</div>
@@ -412,6 +519,20 @@ _DASHBOARD_HTML = """<!doctype html>
           <small>${item.risk_level} · ${item.reviewer_note || 'no reviewer note'}</small>
         </div>
       `, 'No approvals yet.');
+      qs('runCapturesList').innerHTML = listHtml(run.scene_captures, (item) => `
+        <div class="item">
+          <strong>${item.scene_summary || 'Captured scene'}</strong>
+          <div>${item.ocr_text || 'No OCR text recorded'}</div>
+          <small>${item.risk_level || 'unknown risk'} · ${item.created_at}</small>
+        </div>
+      `, 'No scene captures recorded for this run.');
+      qs('runCardsList').innerHTML = listHtml(run.action_cards, (item) => `
+        <div class="item">
+          <strong>${item.title}</strong>
+          <div>${item.detail}</div>
+          <small>${item.priority} · ${item.status}</small>
+        </div>
+      `, 'No action cards recorded for this run.');
       qs('auditList').innerHTML = listHtml(run.audit_log, (item) => `
         <div class="item">
           <strong>${item.event_type}</strong>
@@ -568,6 +689,14 @@ async def dashboard_summary() -> dict[str, object]:
             "chunks": conn.execute("SELECT COUNT(*) FROM document_chunks WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
             "action_cards": conn.execute("SELECT COUNT(*) FROM action_cards WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
             "captures": conn.execute("SELECT COUNT(*) FROM scene_captures WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
+            "pending_approvals": conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM runs
+                WHERE user_id = ? AND status = 'waiting_for_approval'
+                """,
+                (DEMO_USER_ID,),
+            ).fetchone()[0],
         }
         docs = conn.execute(
             "SELECT id, title, summary, source_path, created_at FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 8",
@@ -577,12 +706,52 @@ async def dashboard_summary() -> dict[str, object]:
             "SELECT id, title, detail, priority, status, created_at FROM action_cards WHERE user_id = ? ORDER BY created_at DESC LIMIT 8",
             (DEMO_USER_ID,),
         ).fetchall()
+        captures = conn.execute(
+            """
+            SELECT id, session_id, run_id, image_path, prompt, ocr_text, scene_summary, risk_level, decisions_json, created_at
+            FROM scene_captures
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 8
+            """,
+            (DEMO_USER_ID,),
+        ).fetchall()
+        approvals = conn.execute(
+            """
+            SELECT
+              runs.id AS run_id,
+              runs.session_id,
+              runs.route_name,
+              runs.user_message,
+              approval_records.status,
+              approval_records.risk_level,
+              approval_records.reason,
+              approval_records.recommended_action,
+              approval_records.created_at
+            FROM approval_records
+            JOIN runs ON runs.id = approval_records.run_id
+            WHERE runs.user_id = ?
+              AND runs.status = 'waiting_for_approval'
+            ORDER BY approval_records.created_at DESC
+            LIMIT 6
+            """,
+            (DEMO_USER_ID,),
+        ).fetchall()
     finally:
         conn.close()
     recent_runs = await asyncio.to_thread(session_manager.list_recent_runs, user_id=DEMO_USER_ID, limit=8)
+    system_metrics = {
+        "scheduler": await scheduler.snapshot(),
+        "event_bus": event_bus.snapshot(),
+    }
     return {
         "counts": counts,
         "documents": [row_to_dict(row) for row in docs],
         "action_cards": [row_to_dict(row) for row in cards],
+        "recent_captures": [row_to_dict(row) for row in captures],
+        "pending_approvals": [row_to_dict(row) for row in approvals],
         "recent_runs": recent_runs,
+        "system_metrics": system_metrics,
+        "provider_profile": _provider_profile(),
+        "latest_eval": _load_latest_eval(),
     }

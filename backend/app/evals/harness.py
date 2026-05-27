@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from ..services.pipeline_service import scene_pipeline_service
 from ..services.session_manager import session_manager
 
 EVAL_DIR = DATA_DIR / "evals"
+LATEST_EVAL_PATH = EVAL_DIR / "latest_eval.json"
 
 
 @dataclass(slots=True)
@@ -258,7 +260,9 @@ async def run_eval() -> dict[str, Any]:
     latencies = [float(item["latency_ms"]) for item in case_results]
     fallback = await _eval_provider_fallbacks()
 
-    return {
+    result = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "case_count": len(case_results),
         "scenario_metrics": {
             "ocr_accuracy": round(sum(ocr_scores) / len(ocr_scores), 3) if ocr_scores else 0.0,
             "retrieval_hit_rate": round(sum(retrieval_scores) / len(retrieval_scores), 3) if retrieval_scores else 0.0,
@@ -269,6 +273,9 @@ async def run_eval() -> dict[str, Any]:
         "provider_fallback": fallback,
         "cases": case_results,
     }
+    LATEST_EVAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LATEST_EVAL_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
 
 
 def main() -> None:

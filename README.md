@@ -1,26 +1,42 @@
 # SceneCopilot
 
-SceneCopilot is a wearable-first scene assistant for real-time inspection,
-text reading, and next-step decision support.
+SceneCopilot is a wearable-first AI runtime for scene inspection, text reading,
+document-grounded guidance, and approval-aware next-step decisions.
 
-The project is organized around a multimodal runtime stack:
+It is built around three operator surfaces:
 
-- `backend/`: FastAPI + Python agent loop + SQLite + SSE event stream
-- `frontend-android/`: Android Java companion app for camera/gallery input
-- `docs/`: product and architecture notes
+- `Android Java field client` for camera capture, gallery input, TTS, and live run updates
+- `Browser control deck` for approvals, run forensics, knowledge ingest, and evaluation review
+- `FastAPI runtime` for orchestration, provider routing, retrieval, persistence, and SSE
 
-## Product shape
+## What ships today
 
-SceneCopilot is built for glasses, phones, or other first-person cameras.
-It can:
+- real-time run lifecycle with durable `session_id` and `run_id`
+- explicit `planner -> policy -> services -> providers` execution layering
+- scene OCR, scene analysis, decision recommendation, and approval gating
+- hybrid document retrieval with chunking, SQLite FTS, and local hashed embeddings
+- optional external search enrichment for explicit operator lookups
+- structured run artifacts, audit trail, approval records, and action cards
+- bounded scheduler with backpressure and run-scoped SSE streams
+- evaluation harness with latency, retrieval, OCR, and fallback metrics
 
-- scan a scene and summarize what matters
-- read visible text and extract key instructions
-- search uploaded manuals and SOPs for matching guidance
-- suggest the safest or most likely next action
-- stream its reasoning and tool activity back to the UI
+## Runtime Loop
 
-## Monorepo layout
+```mermaid
+flowchart LR
+    A["Camera or text input"] --> B["Session + Run created"]
+    B --> C["Planner chooses route"]
+    C --> D["Policy checks risk and required actions"]
+    D --> E["OCR / Vision / Retrieval services"]
+    E --> F["Decision service"]
+    F --> G{"Approval required?"}
+    G -->|Yes| H["Human review in browser or Android app"]
+    G -->|No| I["Persist artifacts and action cards"]
+    H --> I
+    I --> J["SSE stream + run detail APIs"]
+```
+
+## Monorepo Layout
 
 ```text
 scenecopilot/
@@ -34,9 +50,12 @@ scenecopilot/
 │   │   ├── db.py
 │   │   ├── seed.py
 │   │   ├── agent/
-│   │   ├── ingest/
-│   │   └── routes/
+│   │   ├── orchestration/
+│   │   ├── providers/
+│   │   ├── routes/
+│   │   └── services/
 │   └── data/
+│       ├── evals/
 │       ├── seed/
 │       ├── uploads/
 │       └── watched/
@@ -50,7 +69,7 @@ scenecopilot/
     └── implementation-roadmap.md
 ```
 
-## Backend quick start
+## Backend Quick Start
 
 Python 3.11+ is enough. `uv` is optional.
 
@@ -64,7 +83,7 @@ python -m app.seed
 uvicorn app.main:app --reload --port 8002
 ```
 
-Backend routes:
+Core routes:
 
 - `GET /`
 - `GET /dashboard`
@@ -80,116 +99,125 @@ Backend routes:
 - `GET /api/system/metrics`
 - `GET /api/state`
 
-## Production-minded backend upgrades
+## Operator Surfaces
 
-This version includes a more mature execution path than the initial scaffold:
+### Browser Control Deck
 
-- bounded async run scheduler with queue backpressure
-- durable `sessions` and `runs` records with `run_id` on responses and events
-- explicit `queued` and `run_started` SSE events
-- per-run status progression from queued to completed or failed
-- explicit `planner -> policy -> services -> providers` execution layering
-- code-level OCR, retrieval, and approval policies instead of prompt-only routing
+Open `/dashboard` to:
+
+- launch text or image runs
+- review recent runs and queue pressure
+- inspect run artifacts, approvals, scene captures, and audit trail
+- upload manuals, SOPs, and reference cards
+- test retrieval with optional external enrichment
+- resolve blocked runs directly from the browser
+- review the latest evaluation baseline
+
+### Android Java Field Client
+
+Open `frontend-android/` in Android Studio. The app currently supports:
+
+- direct camera capture
+- gallery image submission
+- live SSE event stream
+- run detail inspection with artifacts and approvals
+- document search
+- Android TTS playback
+
+Emulators should use `http://10.0.2.2:8002/`. Physical devices should update
+the base URL in
+`frontend-android/app/src/main/java/com/scenecopilot/app/network/ApiClient.java`.
+
+## Runtime Qualities
+
+- bounded async scheduler with queue backpressure and overload rejection
+- explicit run states from `queued` through `completed`, `failed`, or `cancelled`
+- code-level policy gates for OCR strategy, retrieval path, and approval flow
 - replaceable OCR, vision, speech, retrieval, embedding, and decision providers
-- optional Anthropic-backed OCR, vision, and decision providers with local fallback
-- hybrid document retrieval with chunking, hashed local embeddings, and FTS reranking
-- optional external search enrichment for explicit document searches
-- durable OCR / scene / retrieval / decision / approval artifacts per run
-- run-level audit trail plus scene memory and action-card persistence
-- explicit approval-resolution API that moves blocked runs to approved or rejected
-- warm document retrieval in parallel with OCR/scene steps
-- SQLite WAL mode plus FTS-backed document search
-- short-lived in-memory search cache for repeated queries
-- upload size limits for images and documents
-- `X-Process-Time-Ms` response header for quick latency inspection
-- `/api/system/metrics` for scheduler and event-bus visibility
-- run-scoped SSE filtering so clients can subscribe to one execution inside a session
+- run-scoped artifacts for OCR output, scene observations, retrieval hits, and recommendations
+- SSE replay and run filtering for reconnect-safe clients
+- SQLite WAL mode, FTS-backed search, and durable run/event storage
+- process-time response headers and system metrics endpoints
 
-## Mature-project direction
+## Knowledge Layer
 
-The current implementation is still a compact prototype. The repo now also
-includes a larger-scale architecture path:
+SceneCopilot indexes manuals and SOPs into retrieval chunks and ranks them with
+a hybrid strategy:
 
-- [System Blueprint](./docs/system-blueprint.md)
-- [Implementation Roadmap](./docs/implementation-roadmap.md)
+- chunked text windows with overlap
+- SQLite FTS lexical recall
+- local hashed embeddings for deterministic vector scoring
+- reranking into retrieval artifacts that can be audited per run
+- optional external search enrichment for explicit operator searches
 
-Those documents define the target runtime kernel, service boundaries,
-provider interfaces, run/session model, and migration steps toward a more
-serious multimodal agent platform.
+This keeps the default stack portable while still allowing cloud-backed
+providers when you want higher-fidelity OCR or scene understanding.
 
-## Evaluation baseline
+## Runtime Profiles
 
-The backend now includes a small evaluation harness so quality is not judged
-only by “it runs”:
+### Offline-Ready Baseline
+
+The default setup works without cloud model keys:
+
+- local OCR provider
+- local vision provider
+- local decision provider
+- local hashed embedding provider
+- SQLite retrieval provider
+
+This is useful for demos, local development, and deterministic regression runs.
+
+### Cloud-Enhanced Mode
+
+To route OCR, vision, or decision work through Anthropic-backed providers, set:
+
+```bash
+SCENECOPILOT_OCR_PROVIDER=anthropic
+SCENECOPILOT_VISION_PROVIDER=anthropic
+SCENECOPILOT_DECISION_PROVIDER=anthropic
+ANTHROPIC_API_KEY=...
+```
+
+You can mix local and remote providers per capability.
+
+## Evaluation Baseline
+
+Run:
 
 ```bash
 cd backend
 python3 -m app.evals.harness
 ```
 
-The harness currently reports:
+The evaluation harness records:
 
 - OCR accuracy
 - retrieval hit rate
 - high-risk miss rate
-- average and p95 latency
+- average latency
+- p95 latency
 - provider fallback success rate
 
-It uses seeded fixture scenes under `backend/data/evals/` and records results
-through the same run + artifact pipeline as normal execution.
+The latest result is written to
+`backend/data/evals/latest_eval.json` and is surfaced in the browser control
+deck.
 
-## Browser Workspace
+## Architecture Notes
 
-The repo now includes a browser control deck at `/dashboard` to make the
-project easier to inspect and demo:
+The repo already contains the larger-scale expansion path in:
 
-- launch text or image runs
-- inspect recent runs, approvals, artifacts, and audit trails
-- upload documents and test retrieval
-- subscribe to a single run via SSE
-- approve or reject blocked runs from the browser
+- [docs/architecture.md](./docs/architecture.md)
+- [docs/system-blueprint.md](./docs/system-blueprint.md)
+- [docs/implementation-roadmap.md](./docs/implementation-roadmap.md)
 
-This is a management surface. The primary field client is still the Android
-Java app.
+These documents cover the runtime kernel, service boundaries, provider
+contracts, and staged rollout toward a broader multimodal operations platform.
 
-## Android quick start
+## Demo Flow
 
-The frontend is an Android Java companion app. It assumes:
-
-- emulator uses `http://10.0.2.2:8002/`
-- physical devices should change the base URL in `ApiClient.java`
-
-Open `frontend-android/` in Android Studio and run the `app` module.
-
-The Android app now includes:
-
-- live SSE event stream
-- run detail view with route, artifacts, approvals, and recent audit events
-- approval controls for runs that stop at `waiting_for_approval`
-- document search and TTS playback
-- direct camera capture for on-the-spot scene analysis
-
-## Demo flow
-
-1. Upload a manual or SOP into the backend.
-2. Pick a scene image from the Android app.
-3. Ask for one of:
-   - `Read the visible text`
-   - `What am I looking at?`
-   - `What should I do next?`
-4. Watch the SSE reasoning stream update in real time.
-5. Let the app read the final answer aloud with Android TTS.
-6. Open `/dashboard` in a browser to review the run, artifacts, and approvals.
-
-## Notes
-
-- The backend includes a provider-ready agent structure, but it also runs in a
-  local stub mode so the repo stays demo-friendly without model keys.
-- To try the higher-fidelity path, set `SCENECOPILOT_OCR_PROVIDER=anthropic`,
-  `SCENECOPILOT_VISION_PROVIDER=anthropic`, and/or
-  `SCENECOPILOT_DECISION_PROVIDER=anthropic` with a valid `ANTHROPIC_API_KEY`.
-- The Java frontend is intentionally a phone companion app. That is the
-  cleanest interpretation of "frontend in Java" for wearable input workflows.
-- The current workspace did not have FastAPI installed globally, so backend
-  server startup was validated at the code level and with direct module runs,
-  but not by launching `uvicorn` inside this session.
+1. Start the backend and seed the sample data.
+2. Upload a manual or SOP if you want domain-specific guidance.
+3. Launch a scene run from Android or the browser deck.
+4. Watch the SSE stream and inspect the run detail.
+5. Approve or reject blocked recommendations if the policy requires review.
+6. Re-run the evaluation harness and compare the new baseline in `/dashboard`.

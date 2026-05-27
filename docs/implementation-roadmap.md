@@ -128,7 +128,7 @@ These are the best next engineering moves inside the current repo:
 
 ## Definition of maturity
 
-SceneCopilot should be considered "mature prototype" when it has:
+SceneCopilot should be considered release-grade at this layer when it has:
 
 - clear module boundaries
 - stable runtime contracts
