@@ -29,3 +29,12 @@ async def read_bounded_bytes(upload: UploadFile) -> bytes:
 
 async def write_bytes(path: Path, payload: bytes) -> None:
     await asyncio.to_thread(path.write_bytes, payload)
+
+
+async def append_bytes(path: Path, payload: bytes) -> None:
+    def _append() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab") as handle:
+            handle.write(payload)
+
+    await asyncio.to_thread(_append)

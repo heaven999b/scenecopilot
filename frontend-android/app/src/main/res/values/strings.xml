@@ -41,6 +41,8 @@
     <string name="status_live_error">Live scan hit an error and will wait for the next interval.</string>
     <string name="status_recording_audio">Recording audio clip for backend transcription…</string>
     <string name="status_audio_uploading">Uploading audio clip…</string>
+    <string name="status_audio_chunk_uploading">Uploading audio chunk %1$d/%2$d…</string>
+    <string name="status_audio_chunk_queued">Audio chunk stream queued at position %1$d</string>
     <string name="status_audio_permission_denied">Microphone permission was denied.</string>
     <string name="status_audio_ready">Audio clip uploaded for transcription.</string>
     <string name="status_audio_recording_failed">Could not start audio recording.</string>

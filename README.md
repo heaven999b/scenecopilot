@@ -90,6 +90,7 @@ Core routes:
 - `GET /api/health`
 - `POST /api/chat`
 - `POST /api/audio/analyze`
+- `POST /api/audio/chunk`
 - `POST /api/scans/analyze`
 - `GET /api/events/{session_id}`
 - `GET /api/runs/{run_id}`
@@ -123,6 +124,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - gallery image submission
 - voice prompt input through the system speech recognizer
 - raw audio clip upload to the backend ASR route
+- chunked audio upload protocol for incremental speech ingest
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search

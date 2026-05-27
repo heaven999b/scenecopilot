@@ -1,6 +1,7 @@
 package com.scenecopilot.app.network;
 
 import com.scenecopilot.app.models.AcceptedResponse;
+import com.scenecopilot.app.models.AudioChunkUploadResponse;
 import com.scenecopilot.app.models.ChatRequest;
 import com.scenecopilot.app.models.DocumentSearchResponse;
 import com.scenecopilot.app.models.RunApprovalRequest;
@@ -36,6 +37,18 @@ public interface SceneCopilotService {
             @Part MultipartBody.Part audio,
             @Part("prompt") RequestBody prompt,
             @Part("session_id") RequestBody sessionId
+    );
+
+    @Multipart
+    @POST("api/audio/chunk")
+    Call<AudioChunkUploadResponse> uploadAudioChunk(
+            @Part MultipartBody.Part audio,
+            @Part("prompt") RequestBody prompt,
+            @Part("session_id") RequestBody sessionId,
+            @Part("upload_id") RequestBody uploadId,
+            @Part("chunk_index") RequestBody chunkIndex,
+            @Part("final_chunk") RequestBody finalChunk,
+            @Part("audio_ext") RequestBody audioExt
     );
 
     @GET("api/documents/search")

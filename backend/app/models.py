@@ -20,6 +20,17 @@ class ChatResponse(BaseModel):
     queue_position: int = 0
 
 
+class AudioChunkUploadResponse(BaseModel):
+    accepted: bool = True
+    upload_id: str
+    session_id: str
+    received_chunk: int
+    finalized: bool = False
+    state: str = "uploading"
+    run_id: str | None = None
+    queue_position: int | None = None
+
+
 class DocumentUploadResponse(BaseModel):
     document_id: int
     title: str

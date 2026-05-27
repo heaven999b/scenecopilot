@@ -32,6 +32,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.scenecopilot.app.databinding.ActivityMainBinding;
 import com.scenecopilot.app.models.AcceptedResponse;
+import com.scenecopilot.app.models.AudioChunkUploadResponse;
 import com.scenecopilot.app.models.ChatRequest;
 import com.scenecopilot.app.models.DocumentItem;
 import com.scenecopilot.app.models.DocumentSearchResponse;
@@ -48,6 +49,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,6 +72,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final long LIVE_CAPTURE_INTERVAL_MAX_MS = 4200L;
     private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
+    private static final int AUDIO_UPLOAD_CHUNK_BYTES = 192 * 1024;
 
     private ActivityMainBinding binding;
     private SceneCopilotService service;
@@ -361,7 +364,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
                 ? currentSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
-        uploadAudioFile(prompt, pendingAudioFile, sessionId);
+        uploadAudioFileInChunks(prompt, pendingAudioFile, sessionId);
     }
 
     private void cancelAudioRecording() {
@@ -696,6 +699,110 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 cleanupPendingAudioFile();
             }
         });
+    }
+
+    private void uploadAudioFileInChunks(String prompt, File audioFile, String sessionId) {
+        long totalBytes = audioFile.length();
+        if (totalBytes <= 0) {
+            binding.statusText.setText(R.string.status_audio_recording_failed);
+            cleanupPendingAudioFile();
+            return;
+        }
+        int totalChunks = (int) ((totalBytes + AUDIO_UPLOAD_CHUNK_BYTES - 1) / AUDIO_UPLOAD_CHUNK_BYTES);
+        String uploadId = UUID.randomUUID().toString().substring(0, 12);
+        uploadNextAudioChunk(prompt, audioFile, sessionId, uploadId, 0, totalChunks);
+    }
+
+    private void uploadNextAudioChunk(
+            String prompt,
+            File audioFile,
+            String sessionId,
+            String uploadId,
+            int chunkIndex,
+            int totalChunks
+    ) {
+        byte[] payload;
+        try {
+            payload = readAudioChunk(audioFile, chunkIndex);
+        } catch (IOException exc) {
+            showError("Audio chunk read failed: " + exc.getMessage());
+            cleanupPendingAudioFile();
+            return;
+        }
+        boolean finalChunk = chunkIndex == totalChunks - 1;
+        MultipartBody.Part audioPart = buildAudioChunkPart(payload, chunkIndex, finalChunk);
+        RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
+        currentSessionId = sessionId;
+        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
+        RequestBody uploadIdBody = RequestBody.create(uploadId, MediaType.parse("text/plain"));
+        RequestBody chunkIndexBody = RequestBody.create(String.valueOf(chunkIndex), MediaType.parse("text/plain"));
+        RequestBody finalChunkBody = RequestBody.create(String.valueOf(finalChunk), MediaType.parse("text/plain"));
+        RequestBody audioExtBody = RequestBody.create(".m4a", MediaType.parse("text/plain"));
+
+        binding.statusText.setText(getString(R.string.status_audio_chunk_uploading, chunkIndex + 1, totalChunks));
+        service.uploadAudioChunk(
+                audioPart,
+                promptBody,
+                sessionBody,
+                uploadIdBody,
+                chunkIndexBody,
+                finalChunkBody,
+                audioExtBody
+        ).enqueue(new Callback<AudioChunkUploadResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<AudioChunkUploadResponse> call, @NonNull Response<AudioChunkUploadResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Audio chunk upload failed: " + response.code());
+                    cleanupPendingAudioFile();
+                    return;
+                }
+                AudioChunkUploadResponse body = response.body();
+                currentSessionId = body.sessionId;
+                if (!body.finalized) {
+                    uploadNextAudioChunk(prompt, audioFile, body.sessionId, uploadId, chunkIndex + 1, totalChunks);
+                    return;
+                }
+                binding.recordAudioButton.setText(R.string.record_audio);
+                binding.statusText.setText(getString(
+                        R.string.status_audio_chunk_queued,
+                        body.queuePosition != null ? body.queuePosition : 0
+                ));
+                binding.selectedFileLabel.setText(R.string.audio_recorded_label);
+                cleanupPendingAudioFile();
+                if (body.runId != null && !body.runId.isEmpty()) {
+                    startEventStream(body.sessionId, body.runId);
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<AudioChunkUploadResponse> call, @NonNull Throwable t) {
+                showError("Audio chunk upload failed: " + t.getMessage());
+                cleanupPendingAudioFile();
+            }
+        });
+    }
+
+    private byte[] readAudioChunk(File audioFile, int chunkIndex) throws IOException {
+        long offset = (long) chunkIndex * AUDIO_UPLOAD_CHUNK_BYTES;
+        long remaining = Math.max(0L, audioFile.length() - offset);
+        int size = (int) Math.min(AUDIO_UPLOAD_CHUNK_BYTES, remaining);
+        if (size <= 0) {
+            throw new IOException("No audio bytes remain for chunk " + chunkIndex);
+        }
+        byte[] payload = new byte[size];
+        try (RandomAccessFile raf = new RandomAccessFile(audioFile, "r")) {
+            raf.seek(offset);
+            raf.readFully(payload);
+        }
+        return payload;
+    }
+
+    private MultipartBody.Part buildAudioChunkPart(byte[] bytes, int chunkIndex, boolean finalChunk) {
+        String name = finalChunk
+                ? String.format(Locale.US, "audio_chunk_%04d_final.part", chunkIndex)
+                : String.format(Locale.US, "audio_chunk_%04d.part", chunkIndex);
+        RequestBody body = RequestBody.create(bytes, MediaType.parse("application/octet-stream"));
+        return MultipartBody.Part.createFormData("audio", name, body);
     }
 
     private void cleanupPendingAudioFile() {

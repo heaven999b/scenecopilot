@@ -11,6 +11,7 @@ DATA_DIR = BACKEND_DIR / "data"
 SEED_DIR = DATA_DIR / "seed"
 UPLOADS_DIR = DATA_DIR / "uploads"
 WATCH_DIR = DATA_DIR / "watched"
+AUDIO_CHUNK_DIR = UPLOADS_DIR / "audio_chunks"
 
 DB_PATH = Path(
     os.getenv("SCENECOPILOT_DB_PATH", str(DATA_DIR / "runtime" / "scenecopilot.db"))
