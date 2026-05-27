@@ -1,0 +1,62 @@
+{
+  "generated_at": "2026-05-27T22:59:58.552670+00:00",
+  "case_count": 3,
+  "scenario_metrics": {
+    "ocr_accuracy": 1.0,
+    "retrieval_hit_rate": 1.0,
+    "high_risk_miss_rate": 0.0,
+    "avg_latency_ms": 71.86,
+    "p95_latency_ms": 85.88
+  },
+  "provider_fallback": {
+    "successes": 6,
+    "total": 6,
+    "success_rate": 1.0
+  },
+  "cases": [
+    {
+      "name": "warning_panel",
+      "run_id": "4af4f6f7a6284ee1",
+      "expected_high_risk": true,
+      "ocr_match": true,
+      "retrieval_match": true,
+      "risk_match": true,
+      "approval_match": true,
+      "latency_ms": 85.88,
+      "retrieval_titles": [
+        "Forklift Safety SOP",
+        "Wearable Quickstart"
+      ],
+      "decision_risk_level": "high",
+      "approval_required": true
+    },
+    {
+      "name": "menu_board",
+      "run_id": "f6bc34df261e48d9",
+      "expected_high_risk": false,
+      "ocr_match": true,
+      "retrieval_match": null,
+      "risk_match": true,
+      "approval_match": true,
+      "latency_ms": 59.3,
+      "retrieval_titles": [],
+      "decision_risk_level": "low",
+      "approval_required": false
+    },
+    {
+      "name": "wearable_setup",
+      "run_id": "d45802bb57ff41ff",
+      "expected_high_risk": false,
+      "ocr_match": true,
+      "retrieval_match": true,
+      "risk_match": true,
+      "approval_match": true,
+      "latency_ms": 70.39,
+      "retrieval_titles": [
+        "Wearable Quickstart"
+      ],
+      "decision_risk_level": "low",
+      "approval_required": false
+    }
+  ]
+}
