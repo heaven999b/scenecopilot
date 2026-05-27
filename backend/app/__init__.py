@@ -1,0 +1,1 @@
+"""SceneCopilot backend package."""

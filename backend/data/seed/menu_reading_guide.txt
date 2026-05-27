@@ -1,0 +1,6 @@
+Menu reading guide for accessibility and travel support.
+
+1. Start by reading section headers and prices.
+2. Group related dishes together before summarizing.
+3. Highlight allergens, spice indicators, and add-on charges.
+4. If the user asks for a recommendation, prefer simple, concise comparisons.

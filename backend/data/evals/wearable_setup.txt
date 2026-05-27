@@ -1,0 +1,3 @@
+Hold steady for two seconds.
+Center the label before asking for OCR.
+Upload the SOP before inspecting risky equipment.

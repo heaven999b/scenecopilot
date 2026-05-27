@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SceneCopilot</string>
+    <string name="scene_input_title">Scene Input</string>
+    <string name="scene_preview">Selected scene preview</string>
+    <string name="no_image_selected">No image selected yet. You can still ask a text-only question.</string>
+    <string name="prompt_hint">Ask what to read, inspect, or decide</string>
+    <string name="pick_image">Pick Image</string>
+    <string name="capture_photo">Capture Photo</string>
+    <string name="quick_read">Quick Read</string>
+    <string name="analyze_scene">Analyze</string>
+    <string name="captured_photo_label">Captured live from camera</string>
+    <string name="status_label">Status</string>
+    <string name="status_idle">Idle</string>
+    <string name="status_uploading">Uploading request…</string>
+    <string name="status_queued">Queued at position %1$d</string>
+    <string name="status_done">Done</string>
+    <string name="status_approval_needed">Awaiting approval</string>
+    <string name="status_searching_docs">Searching documents…</string>
+    <string name="status_streaming">Streaming session %1$s</string>
+    <string name="status_loading_run_detail">Loading run detail…</string>
+    <string name="status_resolving_approval">Resolving approval…</string>
+    <string name="final_answer_label">Final Answer</string>
+    <string name="waiting_summary">Your final answer will appear here and be read aloud.</string>
+    <string name="docs_title">Document Search</string>
+    <string name="docs_query_hint">Search manuals, SOPs, or guides</string>
+    <string name="search_docs">Search Docs</string>
+    <string name="document_results_placeholder">Relevant documents will appear here.</string>
+    <string name="no_documents_found">No matching documents found.</string>
+    <string name="live_stream_title">Live Event Stream</string>
+    <string name="run_detail_title">Run Detail</string>
+    <string name="run_detail_placeholder">Run metadata, approvals, artifacts, and audit trail will appear here.</string>
+    <string name="approval_summary_placeholder">Approval state will appear here.</string>
+    <string name="audit_summary_placeholder">Audit trail summary will appear here.</string>
+    <string name="approval_note_hint">Optional approval note</string>
+    <string name="refresh_run">Refresh Run</string>
+    <string name="approve_run">Approve</string>
+    <string name="reject_run">Reject</string>
+    <string name="default_prompt">Inspect this scene and tell me what I should do next.</string>
+    <string name="quick_read_prompt">Read the visible text and summarize the key instructions.</string>
+    <string name="backend_url">Backend: %1$s</string>
+</resources>

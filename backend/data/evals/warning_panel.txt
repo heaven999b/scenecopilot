@@ -1,0 +1,3 @@
+Warning: High voltage.
+Read manual before opening panel.
+Stop and call a trained operator if you see sparks or battery leak.

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.SceneCopilot" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/teal_300</item>
+        <item name="colorSecondary">@color/amber_300</item>
+        <item name="android:statusBarColor">@color/slate_950</item>
+        <item name="android:navigationBarColor">@color/slate_950</item>
+        <item name="android:windowBackground">@color/slate_950</item>
+    </style>
+</resources>

@@ -1,0 +1,6 @@
+Wearable quickstart for SceneCopilot demo devices.
+
+1. Keep the camera lens stable for one to two seconds before asking for analysis.
+2. If you need text reading, move closer and center the label or sign.
+3. For risky equipment, ask the assistant to identify warnings before touching anything.
+4. Upload manuals or SOPs first so the assistant can cross-check the scene against trusted instructions.

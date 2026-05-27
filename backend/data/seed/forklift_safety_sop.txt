@@ -1,0 +1,7 @@
+Forklift safety checklist for routine warehouse movement.
+
+1. Inspect tires, forks, and warning lights before moving.
+2. Confirm the aisle is clear and the load is centered.
+3. Never raise the load while turning.
+4. If a warning sticker mentions battery, voltage, or hydraulic leak, stop and notify a trained operator.
+5. Keep pedestrians out of the marked operating zone.
