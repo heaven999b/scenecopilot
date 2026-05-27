@@ -46,4 +46,10 @@ public class RunDetailResponse {
     public boolean isAwaitingApproval() {
         return "waiting_for_approval".equals(status);
     }
+
+    public boolean isTerminal() {
+        return "completed".equals(status)
+                || "failed".equals(status)
+                || "cancelled".equals(status);
+    }
 }

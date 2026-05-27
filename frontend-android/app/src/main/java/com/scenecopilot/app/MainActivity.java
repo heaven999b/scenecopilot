@@ -64,7 +64,11 @@ import retrofit2.Callback;
 import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
-    private static final long LIVE_CAPTURE_INTERVAL_MS = 1800L;
+    private static final long LIVE_CAPTURE_INTERVAL_BASE_MS = 1800L;
+    private static final long LIVE_CAPTURE_INTERVAL_MIN_MS = 1200L;
+    private static final long LIVE_CAPTURE_INTERVAL_MAX_MS = 4200L;
+    private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
+    private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
 
     private ActivityMainBinding binding;
     private SceneCopilotService service;
@@ -84,6 +88,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean liveCaptureInFlight;
     private int liveSubmittedFrames;
     private int liveDroppedFrames;
+    private int liveTimedOutFrames;
+    private long liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
+    private long liveCaptureStartedAtMs;
+    private long liveCaptureDeadlineAtMs;
 
     private final Runnable liveCaptureRunnable = new Runnable() {
         @Override
@@ -92,20 +100,22 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 return;
             }
             if (imageCapture == null) {
-                liveCaptureHandler.postDelayed(this, LIVE_CAPTURE_INTERVAL_MS);
+                liveCaptureHandler.postDelayed(this, liveCaptureIntervalMs);
                 return;
             }
             if (liveCaptureInFlight) {
+                if (System.currentTimeMillis() >= liveCaptureDeadlineAtMs) {
+                    recoverLiveCaptureTimeout();
+                    liveCaptureHandler.postDelayed(this, liveCaptureIntervalMs);
+                    return;
+                }
                 liveDroppedFrames += 1;
-                binding.selectedFileLabel.setText(getString(
-                        R.string.live_frame_stats,
-                        liveSubmittedFrames,
-                        liveDroppedFrames
-                ));
+                increaseLiveCadencePressure(false);
+                updateLiveStatsLabel();
             } else {
                 captureAndAnalyzeLiveFrame();
             }
-            liveCaptureHandler.postDelayed(this, LIVE_CAPTURE_INTERVAL_MS);
+            liveCaptureHandler.postDelayed(this, liveCaptureIntervalMs);
         }
     };
 
@@ -287,6 +297,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveCaptureInFlight = false;
         liveSubmittedFrames = 0;
         liveDroppedFrames = 0;
+        liveTimedOutFrames = 0;
+        liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
+        liveCaptureStartedAtMs = 0L;
+        liveCaptureDeadlineAtMs = 0L;
         liveSessionId = currentSessionId != null && !currentSessionId.isEmpty()
                 ? currentSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
@@ -300,6 +314,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void stopLiveMode(String statusMessage) {
         liveModeEnabled = false;
         liveCaptureInFlight = false;
+        liveCaptureStartedAtMs = 0L;
+        liveCaptureDeadlineAtMs = 0L;
         stopLiveLoop();
         if (cameraProvider != null) {
             cameraProvider.unbindAll();
@@ -322,11 +338,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 cameraProvider = future.get();
                 bindCameraUseCases();
                 binding.statusText.setText(R.string.status_live_camera_ready);
-                binding.selectedFileLabel.setText(getString(
-                        R.string.live_frame_stats,
-                        liveSubmittedFrames,
-                        liveDroppedFrames
-                ));
+                updateLiveStatsLabel();
                 scheduleNextLiveCapture();
             } catch (Exception exc) {
                 stopLiveMode(getString(R.string.status_live_error));
@@ -384,6 +396,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 ? liveSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
         liveCaptureInFlight = true;
+        liveCaptureStartedAtMs = System.currentTimeMillis();
+        liveCaptureDeadlineAtMs = liveCaptureStartedAtMs + LIVE_CAPTURE_TIMEOUT_MS;
         binding.statusText.setText(R.string.status_live_capturing);
         File outputFile = new File(getCacheDir(), "live_frame_" + System.currentTimeMillis() + ".jpg");
         ImageCapture.OutputFileOptions outputOptions =
@@ -403,6 +417,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     );
                 } catch (IOException exc) {
                     liveCaptureInFlight = false;
+                    liveCaptureStartedAtMs = 0L;
+                    liveCaptureDeadlineAtMs = 0L;
                     runOnUiThread(() -> binding.statusText.setText(R.string.status_live_error));
                 } finally {
                     if (outputFile.exists()) {
@@ -414,6 +430,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onError(@NonNull ImageCaptureException exception) {
                 liveCaptureInFlight = false;
+                liveCaptureStartedAtMs = 0L;
+                liveCaptureDeadlineAtMs = 0L;
                 runOnUiThread(() -> binding.statusText.setText(R.string.status_live_error));
             }
         });
@@ -428,6 +446,52 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         binding.liveScanButton.setText(liveModeEnabled
                 ? R.string.pause_live_scan
                 : R.string.start_live_scan);
+    }
+
+    private void updateLiveStatsLabel() {
+        binding.selectedFileLabel.setText(getString(
+                R.string.live_frame_stats_extended,
+                liveSubmittedFrames,
+                liveDroppedFrames,
+                liveTimedOutFrames,
+                liveCaptureIntervalMs / 1000.0
+        ));
+    }
+
+    private void increaseLiveCadencePressure(boolean timeoutTriggered) {
+        long previous = liveCaptureIntervalMs;
+        liveCaptureIntervalMs = Math.min(
+                LIVE_CAPTURE_INTERVAL_MAX_MS,
+                liveCaptureIntervalMs + LIVE_CAPTURE_INTERVAL_STEP_MS
+        );
+        if (liveModeEnabled && liveCaptureIntervalMs > previous) {
+            binding.statusText.setText(timeoutTriggered
+                    ? R.string.status_live_timeout_recovered
+                    : R.string.status_live_backpressure);
+        }
+    }
+
+    private void relaxLiveCadence() {
+        long previous = liveCaptureIntervalMs;
+        liveCaptureIntervalMs = Math.max(
+                LIVE_CAPTURE_INTERVAL_MIN_MS,
+                liveCaptureIntervalMs - LIVE_CAPTURE_INTERVAL_STEP_MS
+        );
+        if (liveModeEnabled && liveCaptureIntervalMs < previous) {
+            binding.statusText.setText(R.string.status_live_speeding_up);
+        }
+    }
+
+    private void recoverLiveCaptureTimeout() {
+        liveCaptureInFlight = false;
+        liveCaptureStartedAtMs = 0L;
+        liveCaptureDeadlineAtMs = 0L;
+        liveTimedOutFrames += 1;
+        increaseLiveCadencePressure(true);
+        updateLiveStatsLabel();
+        if (currentRunId != null && !currentRunId.isEmpty()) {
+            fetchRunDetail(currentRunId, true);
+        }
     }
 
     private void launchVoicePrompt() {
@@ -520,6 +584,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {
                     liveCaptureInFlight = false;
+                    liveCaptureStartedAtMs = 0L;
+                    liveCaptureDeadlineAtMs = 0L;
                     if (liveFrame) {
                         binding.statusText.setText(R.string.status_live_error);
                         return;
@@ -532,11 +598,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 if (liveFrame) {
                     liveSessionId = response.body().sessionId;
                     liveSubmittedFrames += 1;
-                    binding.selectedFileLabel.setText(getString(
-                            R.string.live_frame_stats,
-                            liveSubmittedFrames,
-                            liveDroppedFrames
-                    ));
+                    if (response.body().queuePosition > 0) {
+                        increaseLiveCadencePressure(false);
+                    } else {
+                        relaxLiveCadence();
+                    }
+                    updateLiveStatsLabel();
                     binding.statusText.setText(getString(R.string.status_live_queued, response.body().queuePosition));
                 } else {
                     binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
@@ -547,6 +614,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
                 liveCaptureInFlight = false;
+                liveCaptureStartedAtMs = 0L;
+                liveCaptureDeadlineAtMs = 0L;
                 if (liveFrame) {
                     binding.statusText.setText(R.string.status_live_error);
                     return;
@@ -611,6 +680,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         binding.statusText.setText(R.string.status_approval_needed);
                         if (liveModeEnabled) {
                             liveCaptureInFlight = false;
+                            liveCaptureStartedAtMs = 0L;
+                            liveCaptureDeadlineAtMs = 0L;
                             stopLiveMode(getString(R.string.status_live_waiting_review));
                         }
                     }
@@ -620,6 +691,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         speak(message);
                         if (liveModeEnabled) {
                             liveCaptureInFlight = false;
+                            liveCaptureStartedAtMs = 0L;
+                            liveCaptureDeadlineAtMs = 0L;
+                            relaxLiveCadence();
+                            updateLiveStatsLabel();
                             binding.statusText.setText(getString(
                                     R.string.status_live_running,
                                     liveSubmittedFrames,
@@ -629,6 +704,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     }
                     if ("error".equals(event.eventType) && liveModeEnabled) {
                         liveCaptureInFlight = false;
+                        liveCaptureStartedAtMs = 0L;
+                        liveCaptureDeadlineAtMs = 0L;
+                        increaseLiveCadencePressure(false);
+                        updateLiveStatsLabel();
                         binding.statusText.setText(R.string.status_live_error);
                     }
                     if ("final".equals(event.eventType)
@@ -645,6 +724,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 runOnUiThread(() -> {
                     if (liveModeEnabled) {
                         liveCaptureInFlight = false;
+                        liveCaptureStartedAtMs = 0L;
+                        liveCaptureDeadlineAtMs = 0L;
+                        increaseLiveCadencePressure(false);
+                        updateLiveStatsLabel();
                         binding.statusText.setText(R.string.status_live_error);
                         return;
                     }
@@ -655,12 +738,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void fetchRunDetail(String runId) {
-        binding.statusText.setText(R.string.status_loading_run_detail);
+        fetchRunDetail(runId, false);
+    }
+
+    private void fetchRunDetail(String runId, boolean background) {
+        if (!background) {
+            binding.statusText.setText(R.string.status_loading_run_detail);
+        }
         service.getRun(runId).enqueue(new Callback<RunDetailResponse>() {
             @Override
             public void onResponse(@NonNull Call<RunDetailResponse> call, @NonNull Response<RunDetailResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {
-                    showError("Run detail failed: " + response.code());
+                    if (!background) {
+                        showError("Run detail failed: " + response.code());
+                    }
                     return;
                 }
                 renderRunDetail(response.body());
@@ -668,7 +759,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
             @Override
             public void onFailure(@NonNull Call<RunDetailResponse> call, @NonNull Throwable t) {
-                showError("Run detail failed: " + t.getMessage());
+                if (!background) {
+                    showError("Run detail failed: " + t.getMessage());
+                }
             }
         });
     }
@@ -692,8 +785,23 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (run.outputText != null && !run.outputText.isEmpty()) {
             binding.summaryText.setText(run.outputText);
         }
+        if (run.isTerminal()) {
+            liveCaptureInFlight = false;
+            liveCaptureStartedAtMs = 0L;
+            liveCaptureDeadlineAtMs = 0L;
+            if (liveModeEnabled) {
+                if (run.latencyMs != null && run.latencyMs > 2500) {
+                    increaseLiveCadencePressure(false);
+                } else {
+                    relaxLiveCadence();
+                }
+                updateLiveStatsLabel();
+            }
+        }
         binding.statusText.setText(run.isAwaitingApproval()
                 ? getString(R.string.status_approval_needed)
+                : liveModeEnabled
+                ? getString(R.string.status_live_running, liveSubmittedFrames, liveDroppedFrames)
                 : getString(R.string.status_done));
         setApprovalControlsVisible(run.isAwaitingApproval());
     }
