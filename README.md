@@ -117,6 +117,7 @@ Open `/dashboard` to:
 
 Open `frontend-android/` in Android Studio. The app currently supports:
 
+- CameraX live preview with periodic keyframe capture
 - direct camera capture
 - gallery image submission
 - voice prompt input through the system speech recognizer

@@ -1,13 +1,18 @@
 package com.scenecopilot.app;
 
+import android.Manifest;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.RecognizerIntent;
 import android.speech.tts.TextToSpeech;
 import android.view.View;
+import android.view.Surface;
 import android.webkit.MimeTypeMap;
 import android.widget.Toast;
 
@@ -15,8 +20,15 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ImageCapture;
+import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.Preview;
+import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import com.scenecopilot.app.databinding.ActivityMainBinding;
 import com.scenecopilot.app.models.AcceptedResponse;
 import com.scenecopilot.app.models.ChatRequest;
@@ -32,13 +44,17 @@ import com.scenecopilot.app.network.SceneCopilotService;
 import com.scenecopilot.app.ui.EventAdapter;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
@@ -48,6 +64,8 @@ import retrofit2.Callback;
 import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
+    private static final long LIVE_CAPTURE_INTERVAL_MS = 1800L;
+
     private ActivityMainBinding binding;
     private SceneCopilotService service;
     private EventStreamManager streamManager;
@@ -57,6 +75,39 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextToSpeech textToSpeech;
     private String currentSessionId;
     private String currentRunId;
+    private String liveSessionId;
+    private ProcessCameraProvider cameraProvider;
+    private ImageCapture imageCapture;
+    private ExecutorService cameraExecutor;
+    private final Handler liveCaptureHandler = new Handler(Looper.getMainLooper());
+    private boolean liveModeEnabled;
+    private boolean liveCaptureInFlight;
+    private int liveSubmittedFrames;
+    private int liveDroppedFrames;
+
+    private final Runnable liveCaptureRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!liveModeEnabled) {
+                return;
+            }
+            if (imageCapture == null) {
+                liveCaptureHandler.postDelayed(this, LIVE_CAPTURE_INTERVAL_MS);
+                return;
+            }
+            if (liveCaptureInFlight) {
+                liveDroppedFrames += 1;
+                binding.selectedFileLabel.setText(getString(
+                        R.string.live_frame_stats,
+                        liveSubmittedFrames,
+                        liveDroppedFrames
+                ));
+            } else {
+                captureAndAnalyzeLiveFrame();
+            }
+            liveCaptureHandler.postDelayed(this, LIVE_CAPTURE_INTERVAL_MS);
+        }
+    };
 
     private final ActivityResultLauncher<String> imagePicker =
             registerForActivityResult(new ActivityResultContracts.GetContent(), uri -> {
@@ -97,6 +148,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 binding.statusText.setText(R.string.status_voice_prompt_ready);
             });
 
+    private final ActivityResultLauncher<String> cameraPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) {
+                    startLiveModeInternal();
+                    return;
+                }
+                binding.statusText.setText(R.string.status_live_permission_denied);
+            });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -107,15 +167,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         streamManager = new EventStreamManager(ApiClient.okHttpClient(), ApiClient.baseUrl());
         eventAdapter = new EventAdapter();
         textToSpeech = new TextToSpeech(this, this);
+        cameraExecutor = Executors.newSingleThreadExecutor();
 
         binding.eventsRecycler.setLayoutManager(new LinearLayoutManager(this));
         binding.eventsRecycler.setAdapter(eventAdapter);
 
         binding.topAppBar.setSubtitle(getString(R.string.backend_url, ApiClient.baseUrl()));
         binding.promptInput.setText(getString(R.string.default_prompt));
+        syncPreviewSurface();
+        updateLiveScanButton();
 
-        binding.pickImageButton.setOnClickListener(v -> imagePicker.launch("image/*"));
-        binding.capturePhotoButton.setOnClickListener(v -> cameraCapture.launch(null));
+        binding.pickImageButton.setOnClickListener(v -> {
+            if (liveModeEnabled) {
+                stopLiveMode(getString(R.string.status_live_paused_manual));
+            }
+            imagePicker.launch("image/*");
+        });
+        binding.capturePhotoButton.setOnClickListener(v -> {
+            if (liveModeEnabled) {
+                stopLiveMode(getString(R.string.status_live_paused_manual));
+            }
+            cameraCapture.launch(null);
+        });
+        binding.liveScanButton.setOnClickListener(v -> toggleLiveMode());
         binding.quickReadButton.setOnClickListener(v ->
                 binding.promptInput.setText(getString(R.string.quick_read_prompt)));
         binding.voicePromptButton.setOnClickListener(v -> launchVoicePrompt());
@@ -134,12 +208,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     @Override
     protected void onDestroy() {
+        stopLiveLoop();
+        if (cameraProvider != null) {
+            cameraProvider.unbindAll();
+        }
+        if (cameraExecutor != null) {
+            cameraExecutor.shutdown();
+        }
         streamManager.close();
         if (textToSpeech != null) {
             textToSpeech.stop();
             textToSpeech.shutdown();
         }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onStop() {
+        if (liveModeEnabled) {
+            stopLiveMode(getString(R.string.status_live_paused));
+        }
+        super.onStop();
     }
 
     @Override
@@ -150,6 +239,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void submitCurrentRequest() {
+        if (liveModeEnabled) {
+            stopLiveMode(getString(R.string.status_live_paused_manual));
+        }
         String prompt = binding.promptInput.getText() != null
                 ? binding.promptInput.getText().toString().trim()
                 : "";
@@ -172,6 +264,170 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } else {
             postTextChat(prompt);
         }
+    }
+
+    private void toggleLiveMode() {
+        if (liveModeEnabled) {
+            stopLiveMode(getString(R.string.status_live_paused));
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED) {
+            startLiveModeInternal();
+            return;
+        }
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+    }
+
+    private void startLiveModeInternal() {
+        selectedImageUri = null;
+        capturedImageBytes = null;
+        binding.previewImage.setImageDrawable(null);
+        liveModeEnabled = true;
+        liveCaptureInFlight = false;
+        liveSubmittedFrames = 0;
+        liveDroppedFrames = 0;
+        liveSessionId = currentSessionId != null && !currentSessionId.isEmpty()
+                ? currentSessionId
+                : UUID.randomUUID().toString().substring(0, 12);
+        syncPreviewSurface();
+        updateLiveScanButton();
+        binding.selectedFileLabel.setText(R.string.live_camera_idle);
+        binding.statusText.setText(R.string.status_live_camera_starting);
+        startCameraPreview();
+    }
+
+    private void stopLiveMode(String statusMessage) {
+        liveModeEnabled = false;
+        liveCaptureInFlight = false;
+        stopLiveLoop();
+        if (cameraProvider != null) {
+            cameraProvider.unbindAll();
+        }
+        imageCapture = null;
+        syncPreviewSurface();
+        updateLiveScanButton();
+        if (selectedImageUri == null && capturedImageBytes == null) {
+            binding.selectedFileLabel.setText(R.string.no_image_selected);
+        }
+        if (statusMessage != null && !statusMessage.isEmpty()) {
+            binding.statusText.setText(statusMessage);
+        }
+    }
+
+    private void startCameraPreview() {
+        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
+        future.addListener(() -> {
+            try {
+                cameraProvider = future.get();
+                bindCameraUseCases();
+                binding.statusText.setText(R.string.status_live_camera_ready);
+                binding.selectedFileLabel.setText(getString(
+                        R.string.live_frame_stats,
+                        liveSubmittedFrames,
+                        liveDroppedFrames
+                ));
+                scheduleNextLiveCapture();
+            } catch (Exception exc) {
+                stopLiveMode(getString(R.string.status_live_error));
+                showError("Camera preview failed: " + exc.getMessage());
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
+    private void bindCameraUseCases() {
+        if (cameraProvider == null) {
+            return;
+        }
+        Preview preview = new Preview.Builder().build();
+        preview.setSurfaceProvider(binding.cameraPreviewView.getSurfaceProvider());
+
+        int targetRotation = binding.cameraPreviewView.getDisplay() != null
+                ? binding.cameraPreviewView.getDisplay().getRotation()
+                : Surface.ROTATION_0;
+
+        imageCapture = new ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setJpegQuality(82)
+                .setTargetRotation(targetRotation)
+                .build();
+
+        cameraProvider.unbindAll();
+        cameraProvider.bindToLifecycle(
+                this,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                imageCapture
+        );
+    }
+
+    private void scheduleNextLiveCapture() {
+        stopLiveLoop();
+        liveCaptureHandler.postDelayed(liveCaptureRunnable, 600L);
+    }
+
+    private void stopLiveLoop() {
+        liveCaptureHandler.removeCallbacks(liveCaptureRunnable);
+    }
+
+    private void captureAndAnalyzeLiveFrame() {
+        if (!liveModeEnabled || imageCapture == null) {
+            return;
+        }
+        String prompt = binding.promptInput.getText() != null
+                ? binding.promptInput.getText().toString().trim()
+                : "";
+        if (prompt.isEmpty()) {
+            prompt = getString(R.string.default_prompt);
+        }
+        String sessionId = liveSessionId != null && !liveSessionId.isEmpty()
+                ? liveSessionId
+                : UUID.randomUUID().toString().substring(0, 12);
+        liveCaptureInFlight = true;
+        binding.statusText.setText(R.string.status_live_capturing);
+        File outputFile = new File(getCacheDir(), "live_frame_" + System.currentTimeMillis() + ".jpg");
+        ImageCapture.OutputFileOptions outputOptions =
+                new ImageCapture.OutputFileOptions.Builder(outputFile).build();
+        imageCapture.takePicture(outputOptions, cameraExecutor, new ImageCapture.OnImageSavedCallback() {
+            @Override
+            public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+                try {
+                    byte[] payload = Files.readAllBytes(outputFile.toPath());
+                    uploadImageBytes(
+                            prompt,
+                            payload,
+                            "live_frame.jpg",
+                            "image/jpeg",
+                            sessionId,
+                            true
+                    );
+                } catch (IOException exc) {
+                    liveCaptureInFlight = false;
+                    runOnUiThread(() -> binding.statusText.setText(R.string.status_live_error));
+                } finally {
+                    if (outputFile.exists()) {
+                        outputFile.delete();
+                    }
+                }
+            }
+
+            @Override
+            public void onError(@NonNull ImageCaptureException exception) {
+                liveCaptureInFlight = false;
+                runOnUiThread(() -> binding.statusText.setText(R.string.status_live_error));
+            }
+        });
+    }
+
+    private void syncPreviewSurface() {
+        binding.cameraPreviewView.setVisibility(liveModeEnabled ? View.VISIBLE : View.GONE);
+        binding.previewImage.setVisibility(liveModeEnabled ? View.GONE : View.VISIBLE);
+    }
+
+    private void updateLiveScanButton() {
+        binding.liveScanButton.setText(liveModeEnabled
+                ? R.string.pause_live_scan
+                : R.string.start_live_scan);
     }
 
     private void launchVoicePrompt() {
@@ -236,24 +492,65 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void uploadImageBytes(String prompt, byte[] bytes, String fileName, String mimeType) {
+        uploadImageBytes(
+                prompt,
+                bytes,
+                fileName,
+                mimeType,
+                UUID.randomUUID().toString().substring(0, 12),
+                false
+        );
+    }
+
+    private void uploadImageBytes(
+            String prompt,
+            byte[] bytes,
+            String fileName,
+            String mimeType,
+            String sessionId,
+            boolean liveFrame
+    ) {
         MultipartBody.Part imagePart = buildImagePart(bytes, fileName, mimeType);
         RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
-        currentSessionId = UUID.randomUUID().toString().substring(0, 12);
-        RequestBody sessionBody = RequestBody.create(currentSessionId, MediaType.parse("text/plain"));
+        currentSessionId = sessionId;
+        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
 
         service.analyzeScene(imagePart, promptBody, sessionBody).enqueue(new Callback<AcceptedResponse>() {
             @Override
             public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {
+                    liveCaptureInFlight = false;
+                    if (liveFrame) {
+                        binding.statusText.setText(R.string.status_live_error);
+                        return;
+                    }
                     showError("Camera analyze failed: " + response.code());
                     return;
                 }
-                binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
+                currentSessionId = response.body().sessionId;
+                currentRunId = response.body().runId;
+                if (liveFrame) {
+                    liveSessionId = response.body().sessionId;
+                    liveSubmittedFrames += 1;
+                    binding.selectedFileLabel.setText(getString(
+                            R.string.live_frame_stats,
+                            liveSubmittedFrames,
+                            liveDroppedFrames
+                    ));
+                    binding.statusText.setText(getString(R.string.status_live_queued, response.body().queuePosition));
+                } else {
+                    binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
+                }
                 startEventStream(response.body().sessionId, response.body().runId);
             }
 
             @Override
             public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
+                liveCaptureInFlight = false;
+                if (liveFrame) {
+                    binding.statusText.setText(R.string.status_live_error);
+                    return;
+                }
                 showError("Camera analyze failed: " + t.getMessage());
             }
         });
@@ -312,11 +609,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     binding.eventsRecycler.smoothScrollToPosition(Math.max(0, eventAdapter.getItemCount() - 1));
                     if ("approval".equals(event.eventType)) {
                         binding.statusText.setText(R.string.status_approval_needed);
+                        if (liveModeEnabled) {
+                            liveCaptureInFlight = false;
+                            stopLiveMode(getString(R.string.status_live_waiting_review));
+                        }
                     }
                     if ("final".equals(event.eventType)) {
                         String message = event.getDisplayBody();
                         binding.summaryText.setText(message);
                         speak(message);
+                        if (liveModeEnabled) {
+                            liveCaptureInFlight = false;
+                            binding.statusText.setText(getString(
+                                    R.string.status_live_running,
+                                    liveSubmittedFrames,
+                                    liveDroppedFrames
+                            ));
+                        }
+                    }
+                    if ("error".equals(event.eventType) && liveModeEnabled) {
+                        liveCaptureInFlight = false;
+                        binding.statusText.setText(R.string.status_live_error);
                     }
                     if ("final".equals(event.eventType)
                             || "approval".equals(event.eventType)
@@ -329,7 +642,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
             @Override
             public void onFailure(String message) {
-                runOnUiThread(() -> showError("SSE failed: " + message));
+                runOnUiThread(() -> {
+                    if (liveModeEnabled) {
+                        liveCaptureInFlight = false;
+                        binding.statusText.setText(R.string.status_live_error);
+                        return;
+                    }
+                    showError("SSE failed: " + message);
+                });
             }
         });
     }

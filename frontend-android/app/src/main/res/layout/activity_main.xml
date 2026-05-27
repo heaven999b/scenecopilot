@@ -48,15 +48,28 @@
                         android:textSize="18sp"
                         android:textStyle="bold" />
 
-                    <ImageView
-                        android:id="@+id/previewImage"
+                    <FrameLayout
                         android:layout_width="match_parent"
                         android:layout_height="220dp"
-                        android:layout_marginTop="12dp"
-                        android:background="@color/slate_800"
-                        android:contentDescription="@string/scene_preview"
-                        android:scaleType="centerCrop"
-                        android:src="@android:color/transparent" />
+                        android:layout_marginTop="12dp">
+
+                        <androidx.camera.view.PreviewView
+                            android:id="@+id/cameraPreviewView"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:background="@color/slate_800"
+                            android:contentDescription="@string/live_surface_description"
+                            android:visibility="gone" />
+
+                        <ImageView
+                            android:id="@+id/previewImage"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:background="@color/slate_800"
+                            android:contentDescription="@string/scene_preview"
+                            android:scaleType="centerCrop"
+                            android:src="@android:color/transparent" />
+                    </FrameLayout>
 
                     <TextView
                         android:id="@+id/selectedFileLabel"
@@ -65,6 +78,43 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/no_image_selected"
                         android:textColor="@color/slate_300" />
+
+                    <com.google.android.material.card.MaterialCardView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        app:cardBackgroundColor="@color/slate_800"
+                        app:cardCornerRadius="16dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:padding="12dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="@string/live_capture_title"
+                                android:textColor="@android:color/white"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="@string/live_capture_description"
+                                android:textColor="@color/slate_300" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/liveScanButton"
+                                style="@style/Widget.Material3.Button.TonalButton"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="10dp"
+                                android:text="@string/start_live_scan" />
+                        </LinearLayout>
+                    </com.google.android.material.card.MaterialCardView>
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"

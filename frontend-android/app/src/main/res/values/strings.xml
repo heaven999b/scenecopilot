@@ -4,9 +4,12 @@
     <string name="scene_input_title">Scene Input</string>
     <string name="scene_preview">Selected scene preview</string>
     <string name="no_image_selected">No image selected yet. You can still ask a text-only question.</string>
+    <string name="live_camera_idle">Live camera is idle. Start live scan to stream periodic captures.</string>
     <string name="prompt_hint">Ask what to read, inspect, or decide</string>
     <string name="pick_image">Pick Image</string>
     <string name="capture_photo">Capture Photo</string>
+    <string name="start_live_scan">Start Live Scan</string>
+    <string name="pause_live_scan">Pause Live Scan</string>
     <string name="voice_prompt">Voice Prompt</string>
     <string name="quick_read">Quick Read</string>
     <string name="analyze_scene">Analyze</string>
@@ -21,6 +24,16 @@
     <string name="status_streaming">Streaming session %1$s</string>
     <string name="status_loading_run_detail">Loading run detail…</string>
     <string name="status_resolving_approval">Resolving approval…</string>
+    <string name="status_live_camera_starting">Starting live camera preview…</string>
+    <string name="status_live_camera_ready">Live camera ready. Waiting for the next capture window.</string>
+    <string name="status_live_capturing">Capturing the next live frame…</string>
+    <string name="status_live_queued">Live frame queued at position %1$d</string>
+    <string name="status_live_running">Live scan running: %1$d submitted · %2$d dropped</string>
+    <string name="status_live_paused">Live scan paused.</string>
+    <string name="status_live_paused_manual">Live scan paused for manual input.</string>
+    <string name="status_live_permission_denied">Camera permission was denied.</string>
+    <string name="status_live_waiting_review">Live scan paused because this run needs review.</string>
+    <string name="status_live_error">Live scan hit an error and will wait for the next interval.</string>
     <string name="status_listening">Listening for a spoken prompt…</string>
     <string name="status_voice_prompt_ready">Voice prompt inserted. Review it or tap Analyze.</string>
     <string name="final_answer_label">Final Answer</string>
@@ -45,4 +58,8 @@
     <string name="voice_prompt_hint">Speak what to read, inspect, or decide</string>
     <string name="voice_prompt_missing">No speech recognizer is available on this device.</string>
     <string name="voice_prompt_empty">No voice prompt was captured.</string>
+    <string name="live_frame_stats">Live frames: %1$d submitted · %2$d dropped</string>
+    <string name="live_surface_description">Live camera preview</string>
+    <string name="live_capture_title">Live Capture</string>
+    <string name="live_capture_description">Back camera preview with periodic keyframe capture. New frames are dropped while the current run is still processing.</string>
 </resources>
