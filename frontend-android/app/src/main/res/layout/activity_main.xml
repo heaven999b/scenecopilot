@@ -194,9 +194,19 @@
                             android:orientation="horizontal">
 
                             <com.google.android.material.button.MaterialButton
-                                android:id="@+id/analyzeButton"
-                                android:layout_width="match_parent"
+                                android:id="@+id/recordAudioButton"
+                                style="@style/Widget.Material3.Button.TonalButton"
+                                android:layout_width="0dp"
                                 android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/record_audio" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/analyzeButton"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:layout_weight="1"
                                 android:text="@string/analyze_scene" />
                         </LinearLayout>
                     </LinearLayout>

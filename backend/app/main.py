@@ -12,7 +12,7 @@ from fastapi.responses import Response
 from .config import ENABLE_WATCHER
 from .db import init_db
 from .ingest.watcher import start_watcher
-from .routes import chat, dashboard, documents, events, runs, scans, state, system
+from .routes import audio, chat, dashboard, documents, events, runs, scans, state, system
 from .runtime import scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -62,5 +62,5 @@ async def health() -> dict[str, object]:
     }
 
 
-for router in (dashboard.router, chat.router, documents.router, events.router, runs.router, scans.router, state.router, system.router):
+for router in (dashboard.router, chat.router, audio.router, documents.router, events.router, runs.router, scans.router, state.router, system.router):
     app.include_router(router)

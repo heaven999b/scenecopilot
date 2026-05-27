@@ -15,11 +15,13 @@ from .local import (
     LocalHashEmbeddingProvider,
     LocalDecisionProvider,
     LocalOCRProvider,
+    LocalSpeechProvider,
     LocalVisionProvider,
     NoopEmbeddingProvider,
     NoopSpeechProvider,
     SQLiteRetrievalProvider,
 )
+from .openai_audio import OpenAITranscriptionProvider
 
 
 @dataclass(slots=True)
@@ -48,6 +50,8 @@ def load_provider_bundle() -> ProviderBundle:
     sqlite_retrieval = SQLiteRetrievalProvider()
     local_decision = LocalDecisionProvider()
     local_embedding = LocalHashEmbeddingProvider()
+    local_speech = LocalSpeechProvider()
+    openai_speech = OpenAITranscriptionProvider()
     noop_speech = NoopSpeechProvider()
     noop_embedding = NoopEmbeddingProvider()
 
@@ -56,7 +60,11 @@ def load_provider_bundle() -> ProviderBundle:
         vision=_select(VISION_PROVIDER, {"local": local_vision, "anthropic": anthropic_vision}, local_vision),
         retrieval=_select(RETRIEVAL_PROVIDER, {"sqlite": sqlite_retrieval}, sqlite_retrieval),
         decision=_select(DECISION_PROVIDER, {"local": local_decision, "anthropic": anthropic_decision}, local_decision),
-        speech=_select(SPEECH_PROVIDER, {"noop": noop_speech}, noop_speech),
+        speech=_select(
+            SPEECH_PROVIDER,
+            {"local": local_speech, "openai": openai_speech, "noop": noop_speech},
+            local_speech,
+        ),
         embedding=_select(EMBEDDING_PROVIDER, {"local_hash": local_embedding, "noop": noop_embedding}, local_embedding),
     )
 

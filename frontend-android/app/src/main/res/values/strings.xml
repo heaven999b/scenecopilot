@@ -10,6 +10,8 @@
     <string name="capture_photo">Capture Photo</string>
     <string name="start_live_scan">Start Live Scan</string>
     <string name="pause_live_scan">Pause Live Scan</string>
+    <string name="record_audio">Record Audio</string>
+    <string name="stop_recording">Stop Recording</string>
     <string name="voice_prompt">Voice Prompt</string>
     <string name="quick_read">Quick Read</string>
     <string name="analyze_scene">Analyze</string>
@@ -37,6 +39,12 @@
     <string name="status_live_permission_denied">Camera permission was denied.</string>
     <string name="status_live_waiting_review">Live scan paused because this run needs review.</string>
     <string name="status_live_error">Live scan hit an error and will wait for the next interval.</string>
+    <string name="status_recording_audio">Recording audio clip for backend transcription…</string>
+    <string name="status_audio_uploading">Uploading audio clip…</string>
+    <string name="status_audio_permission_denied">Microphone permission was denied.</string>
+    <string name="status_audio_ready">Audio clip uploaded for transcription.</string>
+    <string name="status_audio_recording_failed">Could not start audio recording.</string>
+    <string name="audio_recorded_label">Captured raw audio clip for backend ASR</string>
     <string name="status_listening">Listening for a spoken prompt…</string>
     <string name="status_voice_prompt_ready">Voice prompt inserted. Review it or tap Analyze.</string>
     <string name="final_answer_label">Final Answer</string>
@@ -57,6 +65,7 @@
     <string name="reject_run">Reject</string>
     <string name="default_prompt">Inspect this scene and tell me what I should do next.</string>
     <string name="quick_read_prompt">Read the visible text and summarize the key instructions.</string>
+    <string name="default_audio_prompt">Transcribe this spoken request and tell me the safest next step.</string>
     <string name="backend_url">Backend: %1$s</string>
     <string name="voice_prompt_hint">Speak what to read, inspect, or decide</string>
     <string name="voice_prompt_missing">No speech recognizer is available on this device.</string>

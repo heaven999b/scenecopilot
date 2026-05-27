@@ -164,6 +164,22 @@ class NoopSpeechProvider:
         return f"Speech provider not configured for {audio_path}."
 
 
+class LocalSpeechProvider:
+    name = "local"
+
+    async def transcribe(self, audio_path: str) -> str:
+        path = Path(audio_path)
+        sidecar = path.with_suffix(".txt")
+        if sidecar.exists():
+            text = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                return text
+        return (
+            "Audio clip received. Configure the OpenAI speech provider for live transcription, "
+            "or provide a sidecar transcript file for deterministic local runs."
+        )
+
+
 class LocalHashEmbeddingProvider:
     name = "local_hash"
 

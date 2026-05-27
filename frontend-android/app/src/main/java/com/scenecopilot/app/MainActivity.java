@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -92,6 +93,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
     private long liveCaptureStartedAtMs;
     private long liveCaptureDeadlineAtMs;
+    private MediaRecorder audioRecorder;
+    private File pendingAudioFile;
+    private boolean audioRecordingActive;
 
     private final Runnable liveCaptureRunnable = new Runnable() {
         @Override
@@ -167,6 +171,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 binding.statusText.setText(R.string.status_live_permission_denied);
             });
 
+    private final ActivityResultLauncher<String> audioPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) {
+                    startAudioRecording();
+                    return;
+                }
+                binding.statusText.setText(R.string.status_audio_permission_denied);
+            });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -203,6 +216,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         binding.quickReadButton.setOnClickListener(v ->
                 binding.promptInput.setText(getString(R.string.quick_read_prompt)));
         binding.voicePromptButton.setOnClickListener(v -> launchVoicePrompt());
+        binding.recordAudioButton.setOnClickListener(v -> toggleAudioRecording());
         binding.analyzeButton.setOnClickListener(v -> submitCurrentRequest());
         binding.searchDocsButton.setOnClickListener(v -> searchDocuments());
         binding.refreshRunButton.setOnClickListener(v -> {
@@ -218,6 +232,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     @Override
     protected void onDestroy() {
+        cancelAudioRecording();
         stopLiveLoop();
         if (cameraProvider != null) {
             cameraProvider.unbindAll();
@@ -238,6 +253,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (liveModeEnabled) {
             stopLiveMode(getString(R.string.status_live_paused));
         }
+        if (audioRecordingActive) {
+            cancelAudioRecording();
+        }
         super.onStop();
     }
 
@@ -251,6 +269,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void submitCurrentRequest() {
         if (liveModeEnabled) {
             stopLiveMode(getString(R.string.status_live_paused_manual));
+        }
+        if (audioRecordingActive) {
+            cancelAudioRecording();
         }
         String prompt = binding.promptInput.getText() != null
                 ? binding.promptInput.getText().toString().trim()
@@ -273,6 +294,98 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             uploadImage(prompt);
         } else {
             postTextChat(prompt);
+        }
+    }
+
+    private void toggleAudioRecording() {
+        if (audioRecordingActive) {
+            stopAudioRecordingAndUpload();
+            return;
+        }
+        if (liveModeEnabled) {
+            stopLiveMode(getString(R.string.status_live_paused_manual));
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            startAudioRecording();
+            return;
+        }
+        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
+    }
+
+    private void startAudioRecording() {
+        pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".m4a");
+        audioRecorder = new MediaRecorder();
+        try {
+            audioRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            audioRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            audioRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            audioRecorder.setAudioSamplingRate(16000);
+            audioRecorder.setAudioEncodingBitRate(64000);
+            audioRecorder.setOutputFile(pendingAudioFile.getAbsolutePath());
+            audioRecorder.prepare();
+            audioRecorder.start();
+            audioRecordingActive = true;
+            binding.recordAudioButton.setText(R.string.stop_recording);
+            binding.statusText.setText(R.string.status_recording_audio);
+            binding.selectedFileLabel.setText(R.string.audio_recorded_label);
+        } catch (Exception exc) {
+            cancelAudioRecording();
+            showError(getString(R.string.status_audio_recording_failed));
+        }
+    }
+
+    private void stopAudioRecordingAndUpload() {
+        try {
+            if (audioRecorder != null) {
+                audioRecorder.stop();
+            }
+        } catch (RuntimeException ignored) {
+        } finally {
+            releaseAudioRecorder();
+        }
+
+        binding.recordAudioButton.setText(R.string.record_audio);
+        if (pendingAudioFile == null || !pendingAudioFile.exists()) {
+            binding.statusText.setText(R.string.status_audio_recording_failed);
+            return;
+        }
+        binding.statusText.setText(R.string.status_audio_uploading);
+
+        String prompt = binding.promptInput.getText() != null
+                ? binding.promptInput.getText().toString().trim()
+                : "";
+        if (prompt.isEmpty()) {
+            prompt = getString(R.string.default_audio_prompt);
+        }
+        String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
+                ? currentSessionId
+                : UUID.randomUUID().toString().substring(0, 12);
+        uploadAudioFile(prompt, pendingAudioFile, sessionId);
+    }
+
+    private void cancelAudioRecording() {
+        try {
+            if (audioRecorder != null) {
+                audioRecorder.stop();
+            }
+        } catch (RuntimeException ignored) {
+        } finally {
+            releaseAudioRecorder();
+        }
+        if (pendingAudioFile != null && pendingAudioFile.exists()) {
+            pendingAudioFile.delete();
+        }
+        pendingAudioFile = null;
+        binding.recordAudioButton.setText(R.string.record_audio);
+    }
+
+    private void releaseAudioRecorder() {
+        audioRecordingActive = false;
+        if (audioRecorder != null) {
+            audioRecorder.reset();
+            audioRecorder.release();
+            audioRecorder = null;
         }
     }
 
@@ -553,6 +666,43 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } catch (IOException e) {
             showError("Could not read selected image: " + e.getMessage());
         }
+    }
+
+    private void uploadAudioFile(String prompt, File audioFile, String sessionId) {
+        RequestBody audioBody = RequestBody.create(audioFile, MediaType.parse("audio/m4a"));
+        MultipartBody.Part audioPart = MultipartBody.Part.createFormData("audio", audioFile.getName(), audioBody);
+        RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
+        currentSessionId = sessionId;
+        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
+
+        service.analyzeAudio(audioPart, promptBody, sessionBody).enqueue(new Callback<AcceptedResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Audio analyze failed: " + response.code());
+                    cleanupPendingAudioFile();
+                    return;
+                }
+                binding.recordAudioButton.setText(R.string.record_audio);
+                binding.statusText.setText(R.string.status_audio_ready);
+                binding.selectedFileLabel.setText(R.string.audio_recorded_label);
+                cleanupPendingAudioFile();
+                startEventStream(response.body().sessionId, response.body().runId);
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
+                showError("Audio analyze failed: " + t.getMessage());
+                cleanupPendingAudioFile();
+            }
+        });
+    }
+
+    private void cleanupPendingAudioFile() {
+        if (pendingAudioFile != null && pendingAudioFile.exists()) {
+            pendingAudioFile.delete();
+        }
+        pendingAudioFile = null;
     }
 
     private void uploadImageBytes(String prompt, byte[] bytes, String fileName, String mimeType) {

@@ -30,6 +30,14 @@ public interface SceneCopilotService {
             @Part("session_id") RequestBody sessionId
     );
 
+    @Multipart
+    @POST("api/audio/analyze")
+    Call<AcceptedResponse> analyzeAudio(
+            @Part MultipartBody.Part audio,
+            @Part("prompt") RequestBody prompt,
+            @Part("session_id") RequestBody sessionId
+    );
+
     @GET("api/documents/search")
     Call<DocumentSearchResponse> searchDocuments(
             @Query("q") String query,
