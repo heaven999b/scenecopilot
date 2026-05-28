@@ -9,7 +9,7 @@ from typing import Any
 
 from ..config import DEMO_USER_ID
 from ..db import conn_ctx, get_conn
-from ..domain.runtime_models import ActionRecommendation, FrameRef, RetrievalHit, RiskLevel, RunStatus
+from ..domain.runtime_models import ActionRecommendation, ArtifactType, FrameRef, RetrievalHit, RiskLevel, RunStatus
 from ..observability.metrics import Timer
 from ..orchestration.planner import build_default_plan
 from ..orchestration.policies import (
@@ -188,6 +188,8 @@ async def run_agent(
     image_paths: list[str] | None = None,
     audio_paths: list[str] | None = None,
     *,
+    prefetched_transcript: str | None = None,
+    transcript_source_run_id: str | None = None,
     visible_text: str | None = None,
     run_id: str | None = None,
     trigger: str = "chat",
@@ -199,7 +201,7 @@ async def run_agent(
     plan = build_default_plan(
         user_message=user_message,
         has_image=bool(image_paths),
-        has_audio=bool(audio_paths),
+        has_audio=bool(audio_paths or prefetched_transcript),
     )
 
     if run_id is None:
@@ -214,6 +216,8 @@ async def run_agent(
                 "visible_text_hint": visible_text,
                 "image_paths": image_paths,
                 "audio_paths": audio_paths,
+                "prefetched_transcript": prefetched_transcript,
+                "transcript_source_run_id": transcript_source_run_id,
             },
             plan=plan,
         )
@@ -223,7 +227,7 @@ async def run_agent(
     if session_id is None:
         raise ValueError("session_id is required when run_id is provided")
 
-    transcript = ""
+    transcript = (prefetched_transcript or "").strip()
     ocr_text = ""
     scene_summary = "No scene image was provided, so the answer is based on the user request and matching documents only."
     scene_risk = RiskLevel.LOW
@@ -283,7 +287,52 @@ async def run_agent(
         )
 
         combined_prompt = user_message
-        if audio_paths:
+        if transcript:
+            await _emit_stage(
+                session_id=session_id,
+                run_id=run_id,
+                status=RunStatus.RUNNING_ASR,
+                name="asr_reuse",
+                message="Reusing transcript from a recent aligned audio window.",
+                user_id=user_id,
+            )
+            await asyncio.to_thread(
+                artifact_service.record_artifact,
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type=ArtifactType.TRANSCRIPT,
+                stage="asr_reuse",
+                provider="aligned_audio_window",
+                content={
+                    "transcript": transcript,
+                    "source_run_id": transcript_source_run_id,
+                    "reused": True,
+                },
+                user_id=user_id,
+            )
+            await _record_audit(
+                session_id=session_id,
+                run_id=run_id,
+                event_type="transcript_reused",
+                detail={
+                    "source_run_id": transcript_source_run_id,
+                    "preview": transcript[:180],
+                },
+                user_id=user_id,
+            )
+            await _emit_artifact(
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type="transcript",
+                payload={
+                    "preview": transcript[:180],
+                    "reused": True,
+                    "source_run_id": transcript_source_run_id,
+                },
+                user_id=user_id,
+            )
+            combined_prompt = " ".join(part for part in (user_message, transcript) if part.strip())
+        elif audio_paths:
             await _emit_stage(
                 session_id=session_id,
                 run_id=run_id,

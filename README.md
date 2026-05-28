@@ -127,6 +127,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - client-side speech gating with push-to-talk long press and low-latency chunk cadence
 - chunked audio upload protocol for incremental speech ingest, including PCM16 capture assembled into WAV on the backend while recording is still in progress
 - session-scoped temporal alignment between recent audio windows and captured live frames
+- transcript reuse for aligned audio windows to reduce repeated ASR latency on nearby scene runs
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search

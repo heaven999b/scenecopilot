@@ -21,6 +21,17 @@ from ..storage import read_bounded_bytes, write_bytes
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
 
+def _usable_transcript(text: str) -> bool:
+    normalized = " ".join(text.split()).strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith("no speech provider configured"):
+        return False
+    if "sidecar transcript" in normalized:
+        return False
+    return True
+
+
 @router.post("/analyze", response_model=ChatResponse)
 async def analyze_scene(
     image: UploadFile = File(...),
@@ -47,17 +58,31 @@ async def analyze_scene(
         target_at_ms=captured_at_ms,
     )
     aligned_audio_paths: list[str] = []
+    prefetched_transcript = ""
+    transcript_source_run_id: str | None = None
     if aligned_audio_window is not None:
         aligned_audio_path = Path(aligned_audio_window["audio_path"]).resolve()
         if aligned_audio_path.exists():
             aligned_audio_paths.append(str(aligned_audio_path))
         else:
             aligned_audio_window = None
+    if aligned_audio_window is not None and aligned_audio_window.get("run_id"):
+        transcript_source_run_id = str(aligned_audio_window["run_id"])
+        transcript_artifact = await asyncio.to_thread(
+            artifact_service.latest_artifact,
+            transcript_source_run_id,
+            ArtifactType.TRANSCRIPT,
+        )
+        if transcript_artifact is not None:
+            transcript_content = transcript_artifact.get("content_json") or {}
+            transcript_text = str(transcript_content.get("transcript") or "").strip()
+            if _usable_transcript(transcript_text):
+                prefetched_transcript = transcript_text
 
     plan = build_default_plan(
         user_message=prompt,
         has_image=True,
-        has_audio=bool(aligned_audio_paths),
+        has_audio=bool(aligned_audio_paths or prefetched_transcript),
     )
     handle = await asyncio.to_thread(
         session_manager.start_run,
@@ -78,6 +103,8 @@ async def analyze_scene(
                 "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
                 "gap_ms": aligned_audio_window.get("gap_ms"),
                 "alignment_mode": aligned_audio_window.get("alignment_mode"),
+                "transcript_reused": bool(prefetched_transcript),
+                "transcript_source_run_id": transcript_source_run_id,
             } if aligned_audio_window is not None else None,
         },
         plan=plan,
@@ -98,6 +125,8 @@ async def analyze_scene(
                 "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
                 "gap_ms": aligned_audio_window.get("gap_ms"),
                 "alignment_mode": aligned_audio_window.get("alignment_mode"),
+                "transcript_reused": bool(prefetched_transcript),
+                "transcript_source_run_id": transcript_source_run_id,
             },
             user_id=DEMO_USER_ID,
         )
@@ -112,6 +141,8 @@ async def analyze_scene(
                 "audio_run_id": aligned_audio_window.get("run_id"),
                 "gap_ms": aligned_audio_window.get("gap_ms"),
                 "alignment_mode": aligned_audio_window.get("alignment_mode"),
+                "transcript_reused": bool(prefetched_transcript),
+                "transcript_source_run_id": transcript_source_run_id,
             },
             user_id=DEMO_USER_ID,
         )
@@ -122,6 +153,8 @@ async def analyze_scene(
                 session_id=handle.session_id,
                 image_paths=[str(stored.resolve())],
                 audio_paths=aligned_audio_paths,
+                prefetched_transcript=prefetched_transcript or None,
+                transcript_source_run_id=transcript_source_run_id,
                 visible_text=visible_text,
                 run_id=handle.run_id,
                 trigger="scan",

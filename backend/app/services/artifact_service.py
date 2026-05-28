@@ -56,5 +56,23 @@ class ArtifactService:
             conn.close()
         return [row_to_dict(row) for row in rows]
 
+    def latest_artifact(self, run_id: str, artifact_type: ArtifactType | str) -> dict[str, Any] | None:
+        artifact_value = artifact_type.value if isinstance(artifact_type, ArtifactType) else str(artifact_type)
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT id, artifact_type, stage, provider, content_json, created_at
+                FROM run_artifacts
+                WHERE run_id = ? AND artifact_type = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id, artifact_value),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row_to_dict(row) if row is not None else None
+
 
 artifact_service = ArtifactService()
