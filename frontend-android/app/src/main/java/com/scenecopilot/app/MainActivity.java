@@ -75,6 +75,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final long LIVE_CAPTURE_INTERVAL_MAX_MS = 4200L;
     private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
+    private static final long AUDIO_THREAD_JOIN_TIMEOUT_MS = 1500L;
     private static final int AUDIO_UPLOAD_CHUNK_BYTES = 192 * 1024;
     private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
     private static final int AUDIO_CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
@@ -106,7 +107,19 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private File pendingAudioFile;
     private boolean audioRecordingActive;
     private boolean audioRecordingStopRequested;
+    private boolean audioCaptureCompleted;
+    private boolean audioUploadInProgress;
+    private boolean audioUploadFailed;
+    private boolean audioUploadCancelled;
+    private long audioRecordedBytes;
+    private long audioUploadedBytes;
+    private int audioNextChunkIndex;
+    private String activeAudioUploadId;
+    private String activeAudioPrompt;
+    private String activeAudioSessionId;
     private Thread audioCaptureThread;
+    private Thread audioUploadThread;
+    private final Object audioStreamLock = new Object();
 
     private final Runnable liveCaptureRunnable = new Runnable() {
         @Override
@@ -264,7 +277,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (liveModeEnabled) {
             stopLiveMode(getString(R.string.status_live_paused));
         }
-        if (audioRecordingActive) {
+        if (audioRecordingActive || audioUploadInProgress || isAudioUploadThreadBusy()) {
             cancelAudioRecording();
         }
         super.onStop();
@@ -313,6 +326,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             stopAudioRecordingAndUpload();
             return;
         }
+        if (audioUploadInProgress || isAudioUploadThreadBusy()) {
+            binding.statusText.setText(R.string.status_audio_stream_busy);
+            return;
+        }
         if (liveModeEnabled) {
             stopLiveMode(getString(R.string.status_live_paused_manual));
         }
@@ -325,6 +342,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void startAudioRecording() {
+        if (audioUploadInProgress || isAudioUploadThreadBusy()) {
+            binding.statusText.setText(R.string.status_audio_stream_busy);
+            return;
+        }
         int minBufferSize = AudioRecord.getMinBufferSize(
                 AUDIO_SAMPLE_RATE_HZ,
                 AUDIO_CHANNEL_CONFIG,
@@ -336,6 +357,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         int bufferSize = Math.max(minBufferSize * 2, AUDIO_UPLOAD_CHUNK_BYTES / 2);
         pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".pcm");
+        String prompt = currentAudioPrompt();
+        String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
+                ? currentSessionId
+                : UUID.randomUUID().toString().substring(0, 12);
         try {
             audioRecorder = new AudioRecord(
                     MediaRecorder.AudioSource.MIC,
@@ -347,13 +372,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             if (audioRecorder.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException("AudioRecord failed to initialize");
             }
+            initializeAudioStreaming(prompt, sessionId);
             audioRecordingStopRequested = false;
             audioRecorder.startRecording();
             audioRecordingActive = true;
-            startAudioCaptureThread(bufferSize);
+            startAudioCaptureThread(bufferSize, pendingAudioFile);
+            startAudioUploadThread(pendingAudioFile);
             binding.recordAudioButton.setText(R.string.stop_recording);
+            binding.recordAudioButton.setEnabled(true);
             binding.statusText.setText(R.string.status_recording_audio);
-            binding.selectedFileLabel.setText(R.string.audio_recorded_label);
+            binding.selectedFileLabel.setText(R.string.audio_streaming_label);
         } catch (Exception exc) {
             cancelAudioRecording();
             showError(getString(R.string.status_audio_recording_failed));
@@ -373,22 +401,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
 
         binding.recordAudioButton.setText(R.string.record_audio);
-        if (pendingAudioFile == null || !pendingAudioFile.exists()) {
+        if (pendingAudioFile == null || !pendingAudioFile.exists() || audioRecordedBytes <= 0L) {
+            cancelPendingAudioUpload();
+            binding.recordAudioButton.setEnabled(true);
             binding.statusText.setText(R.string.status_audio_recording_failed);
             return;
         }
-        binding.statusText.setText(R.string.status_audio_uploading);
-
-        String prompt = binding.promptInput.getText() != null
-                ? binding.promptInput.getText().toString().trim()
-                : "";
-        if (prompt.isEmpty()) {
-            prompt = getString(R.string.default_audio_prompt);
+        binding.recordAudioButton.setEnabled(false);
+        binding.statusText.setText(R.string.status_audio_stream_finalizing);
+        synchronized (audioStreamLock) {
+            audioCaptureCompleted = true;
+            audioStreamLock.notifyAll();
         }
-        String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
-                ? currentSessionId
-                : UUID.randomUUID().toString().substring(0, 12);
-        uploadAudioFileInChunks(prompt, pendingAudioFile, sessionId, ".wav", "pcm16le_mono_16000");
     }
 
     private void cancelAudioRecording() {
@@ -399,14 +423,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } catch (RuntimeException ignored) {
         } finally {
             audioRecordingStopRequested = true;
+            cancelPendingAudioUpload();
             joinAudioCaptureThread();
             releaseAudioRecorder();
         }
-        if (pendingAudioFile != null && pendingAudioFile.exists()) {
-            pendingAudioFile.delete();
-        }
-        pendingAudioFile = null;
+        joinAudioUploadThread();
+        cleanupPendingAudioFile();
         binding.recordAudioButton.setText(R.string.record_audio);
+        binding.recordAudioButton.setEnabled(true);
     }
 
     private void releaseAudioRecorder() {
@@ -417,18 +441,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
     }
 
-    private void startAudioCaptureThread(int bufferSize) {
+    private void startAudioCaptureThread(int bufferSize, File audioFile) {
         audioCaptureThread = new Thread(() -> {
             byte[] buffer = new byte[bufferSize];
-            try (FileOutputStream outputStream = new FileOutputStream(pendingAudioFile, false)) {
+            try (FileOutputStream outputStream = new FileOutputStream(audioFile, false)) {
                 while (!audioRecordingStopRequested && audioRecorder != null) {
                     int read = audioRecorder.read(buffer, 0, buffer.length);
                     if (read > 0) {
                         outputStream.write(buffer, 0, read);
+                        noteAudioBytesCaptured(read);
+                    } else if (read < 0) {
+                        throw new IOException("AudioRecord read failed with code " + read);
                     }
                 }
                 outputStream.flush();
-            } catch (IOException ignored) {
+            } catch (IOException exc) {
+                failAudioStreaming("Audio capture failed: " + exc.getMessage(), true);
+            } finally {
+                synchronized (audioStreamLock) {
+                    audioCaptureCompleted = true;
+                    audioStreamLock.notifyAll();
+                }
             }
         }, "scenecopilot-audio-capture");
         audioCaptureThread.start();
@@ -439,7 +472,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         try {
-            audioCaptureThread.join(1500L);
+            audioCaptureThread.join(AUDIO_THREAD_JOIN_TIMEOUT_MS);
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         } finally {
@@ -726,85 +759,110 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
     }
 
-    private void uploadAudioFile(String prompt, File audioFile, String sessionId) {
-        RequestBody audioBody = RequestBody.create(audioFile, MediaType.parse("audio/m4a"));
-        MultipartBody.Part audioPart = MultipartBody.Part.createFormData("audio", audioFile.getName(), audioBody);
-        RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
+    private void initializeAudioStreaming(String prompt, String sessionId) {
         currentSessionId = sessionId;
-        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
+        synchronized (audioStreamLock) {
+            activeAudioUploadId = UUID.randomUUID().toString().substring(0, 12);
+            activeAudioPrompt = prompt;
+            activeAudioSessionId = sessionId;
+            audioUploadInProgress = true;
+            audioUploadFailed = false;
+            audioUploadCancelled = false;
+            audioCaptureCompleted = false;
+            audioRecordedBytes = 0L;
+            audioUploadedBytes = 0L;
+            audioNextChunkIndex = 0;
+            audioStreamLock.notifyAll();
+        }
+    }
 
-        service.analyzeAudio(audioPart, promptBody, sessionBody).enqueue(new Callback<AcceptedResponse>() {
-            @Override
-            public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
-                if (!response.isSuccessful() || response.body() == null) {
-                    showError("Audio analyze failed: " + response.code());
-                    cleanupPendingAudioFile();
-                    return;
+    private String currentAudioPrompt() {
+        String prompt = binding.promptInput.getText() != null
+                ? binding.promptInput.getText().toString().trim()
+                : "";
+        if (prompt.isEmpty()) {
+            prompt = getString(R.string.default_audio_prompt);
+        }
+        return prompt;
+    }
+
+    private void startAudioUploadThread(File audioFile) {
+        audioUploadThread = new Thread(() -> {
+            try {
+                while (true) {
+                    AudioChunkPlan plan = awaitNextAudioChunkPlan();
+                    if (plan == null) {
+                        return;
+                    }
+                    runOnUiThread(() -> binding.statusText.setText(plan.finalChunk
+                            ? getString(R.string.status_audio_stream_finalizing)
+                            : getString(R.string.status_audio_chunk_uploading, plan.chunkIndex + 1)));
+                    byte[] payload = readAudioChunk(audioFile, plan.offset, plan.size);
+                    AudioChunkUploadResponse body = uploadAudioChunkSync(payload, plan);
+                    finishAudioChunkUpload(plan, body);
+                    if (plan.finalChunk) {
+                        return;
+                    }
                 }
-                binding.recordAudioButton.setText(R.string.record_audio);
-                binding.statusText.setText(R.string.status_audio_ready);
-                binding.selectedFileLabel.setText(R.string.audio_recorded_label);
-                cleanupPendingAudioFile();
-                startEventStream(response.body().sessionId, response.body().runId);
+            } catch (IOException exc) {
+                failAudioStreaming("Audio chunk upload failed: " + exc.getMessage(), true);
+            } finally {
+                synchronized (audioStreamLock) {
+                    audioUploadInProgress = false;
+                    audioStreamLock.notifyAll();
+                }
             }
-
-            @Override
-            public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
-                showError("Audio analyze failed: " + t.getMessage());
-                cleanupPendingAudioFile();
-            }
-        });
+        }, "scenecopilot-audio-upload");
+        audioUploadThread.start();
     }
 
-    private void uploadAudioFileInChunks(
-            String prompt,
-            File audioFile,
-            String sessionId,
-            String audioExt,
-            String audioFormat
-    ) {
-        long totalBytes = audioFile.length();
-        if (totalBytes <= 0) {
-            binding.statusText.setText(R.string.status_audio_recording_failed);
-            cleanupPendingAudioFile();
-            return;
+    private AudioChunkPlan awaitNextAudioChunkPlan() {
+        synchronized (audioStreamLock) {
+            while (true) {
+                if (audioUploadCancelled || audioUploadFailed) {
+                    return null;
+                }
+                long availableBytes = audioRecordedBytes - audioUploadedBytes;
+                if (availableBytes >= AUDIO_UPLOAD_CHUNK_BYTES) {
+                    return new AudioChunkPlan(
+                            audioUploadedBytes,
+                            AUDIO_UPLOAD_CHUNK_BYTES,
+                            audioNextChunkIndex,
+                            false
+                    );
+                }
+                if (audioCaptureCompleted) {
+                    if (audioRecordedBytes <= 0L && audioNextChunkIndex == 0) {
+                        return null;
+                    }
+                    return new AudioChunkPlan(
+                            audioUploadedBytes,
+                            (int) Math.max(0L, availableBytes),
+                            audioNextChunkIndex,
+                            true
+                    );
+                }
+                try {
+                    audioStreamLock.wait(250L);
+                } catch (InterruptedException exc) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
         }
-        int totalChunks = (int) ((totalBytes + AUDIO_UPLOAD_CHUNK_BYTES - 1) / AUDIO_UPLOAD_CHUNK_BYTES);
-        String uploadId = UUID.randomUUID().toString().substring(0, 12);
-        uploadNextAudioChunk(prompt, audioFile, sessionId, uploadId, 0, totalChunks, audioExt, audioFormat);
     }
 
-    private void uploadNextAudioChunk(
-            String prompt,
-            File audioFile,
-            String sessionId,
-            String uploadId,
-            int chunkIndex,
-            int totalChunks,
-            String audioExt,
-            String audioFormat
-    ) {
-        byte[] payload;
-        try {
-            payload = readAudioChunk(audioFile, chunkIndex);
-        } catch (IOException exc) {
-            showError("Audio chunk read failed: " + exc.getMessage());
-            cleanupPendingAudioFile();
-            return;
-        }
-        boolean finalChunk = chunkIndex == totalChunks - 1;
-        MultipartBody.Part audioPart = buildAudioChunkPart(payload, chunkIndex, finalChunk);
-        RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
-        currentSessionId = sessionId;
-        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
-        RequestBody uploadIdBody = RequestBody.create(uploadId, MediaType.parse("text/plain"));
-        RequestBody chunkIndexBody = RequestBody.create(String.valueOf(chunkIndex), MediaType.parse("text/plain"));
-        RequestBody finalChunkBody = RequestBody.create(String.valueOf(finalChunk), MediaType.parse("text/plain"));
-        RequestBody audioExtBody = RequestBody.create(audioExt, MediaType.parse("text/plain"));
-        RequestBody audioFormatBody = RequestBody.create(audioFormat, MediaType.parse("text/plain"));
+    private AudioChunkUploadResponse uploadAudioChunkSync(byte[] payload, AudioChunkPlan plan) throws IOException {
+        MultipartBody.Part audioPart = buildAudioChunkPart(payload, plan.chunkIndex, plan.finalChunk);
+        RequestBody promptBody = RequestBody.create(activeAudioPrompt, MediaType.parse("text/plain"));
+        RequestBody sessionBody = RequestBody.create(activeAudioSessionId, MediaType.parse("text/plain"));
+        RequestBody uploadIdBody = RequestBody.create(activeAudioUploadId, MediaType.parse("text/plain"));
+        RequestBody chunkIndexBody = RequestBody.create(String.valueOf(plan.chunkIndex), MediaType.parse("text/plain"));
+        RequestBody finalChunkBody = RequestBody.create(String.valueOf(plan.finalChunk), MediaType.parse("text/plain"));
+        RequestBody audioExtBody = RequestBody.create(".wav", MediaType.parse("text/plain"));
+        RequestBody audioFormatBody = RequestBody.create("pcm16le_mono_16000", MediaType.parse("text/plain"));
 
-        binding.statusText.setText(getString(R.string.status_audio_chunk_uploading, chunkIndex + 1, totalChunks));
-        service.uploadAudioChunk(
+        Response<AudioChunkUploadResponse> response = service.uploadAudioChunk(
                 audioPart,
                 promptBody,
                 sessionBody,
@@ -813,55 +871,64 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 finalChunkBody,
                 audioExtBody,
                 audioFormatBody
-        ).enqueue(new Callback<AudioChunkUploadResponse>() {
-            @Override
-            public void onResponse(@NonNull Call<AudioChunkUploadResponse> call, @NonNull Response<AudioChunkUploadResponse> response) {
-                if (!response.isSuccessful() || response.body() == null) {
-                    showError("Audio chunk upload failed: " + response.code());
-                    cleanupPendingAudioFile();
-                    return;
-                }
-                AudioChunkUploadResponse body = response.body();
-                currentSessionId = body.sessionId;
-                if (!body.finalized) {
-                    uploadNextAudioChunk(
-                            prompt,
-                            audioFile,
-                            body.sessionId,
-                            uploadId,
-                            chunkIndex + 1,
-                            totalChunks,
-                            audioExt,
-                            audioFormat
-                    );
-                    return;
-                }
-                binding.recordAudioButton.setText(R.string.record_audio);
-                binding.statusText.setText(getString(
-                        R.string.status_audio_chunk_queued,
-                        body.queuePosition != null ? body.queuePosition : 0
-                ));
-                binding.selectedFileLabel.setText(R.string.audio_recorded_label);
-                cleanupPendingAudioFile();
-                if (body.runId != null && !body.runId.isEmpty()) {
-                    startEventStream(body.sessionId, body.runId);
-                }
-            }
-
-            @Override
-            public void onFailure(@NonNull Call<AudioChunkUploadResponse> call, @NonNull Throwable t) {
-                showError("Audio chunk upload failed: " + t.getMessage());
-                cleanupPendingAudioFile();
-            }
-        });
+        ).execute();
+        if (!response.isSuccessful() || response.body() == null) {
+            throw new IOException("HTTP " + response.code());
+        }
+        return response.body();
     }
 
-    private byte[] readAudioChunk(File audioFile, int chunkIndex) throws IOException {
-        long offset = (long) chunkIndex * AUDIO_UPLOAD_CHUNK_BYTES;
-        long remaining = Math.max(0L, audioFile.length() - offset);
-        int size = (int) Math.min(AUDIO_UPLOAD_CHUNK_BYTES, remaining);
-        if (size <= 0) {
-            throw new IOException("No audio bytes remain for chunk " + chunkIndex);
+    private void finishAudioChunkUpload(AudioChunkPlan plan, AudioChunkUploadResponse body) {
+        synchronized (audioStreamLock) {
+            audioUploadedBytes = plan.offset + plan.size;
+            audioNextChunkIndex = plan.chunkIndex + 1;
+            if (body.sessionId != null && !body.sessionId.isEmpty()) {
+                activeAudioSessionId = body.sessionId;
+            }
+            if (plan.finalChunk) {
+                audioUploadInProgress = false;
+            }
+            audioStreamLock.notifyAll();
+        }
+
+        String nextSessionId = body.sessionId != null && !body.sessionId.isEmpty()
+                ? body.sessionId
+                : activeAudioSessionId;
+        currentSessionId = nextSessionId;
+
+        if (!plan.finalChunk) {
+            runOnUiThread(() -> binding.selectedFileLabel.setText(R.string.audio_streaming_label));
+            return;
+        }
+
+        cleanupPendingAudioFile();
+        runOnUiThread(() -> {
+            binding.recordAudioButton.setEnabled(true);
+            binding.recordAudioButton.setText(R.string.record_audio);
+            binding.statusText.setText(getString(
+                    R.string.status_audio_chunk_queued,
+                    body.queuePosition != null ? body.queuePosition : 0
+            ));
+            binding.selectedFileLabel.setText(R.string.audio_streaming_label);
+        });
+        if (body.runId != null && !body.runId.isEmpty()) {
+            startEventStream(nextSessionId, body.runId);
+        }
+    }
+
+    private void noteAudioBytesCaptured(int bytes) {
+        synchronized (audioStreamLock) {
+            audioRecordedBytes += bytes;
+            audioStreamLock.notifyAll();
+        }
+    }
+
+    private byte[] readAudioChunk(File audioFile, long offset, int size) throws IOException {
+        if (size < 0) {
+            throw new IOException("Invalid audio chunk size " + size);
+        }
+        if (size == 0) {
+            return new byte[0];
         }
         byte[] payload = new byte[size];
         try (RandomAccessFile raf = new RandomAccessFile(audioFile, "r")) {
@@ -869,6 +936,54 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             raf.readFully(payload);
         }
         return payload;
+    }
+
+    private void cancelPendingAudioUpload() {
+        synchronized (audioStreamLock) {
+            audioUploadCancelled = true;
+            audioUploadInProgress = false;
+            audioCaptureCompleted = true;
+            audioStreamLock.notifyAll();
+        }
+    }
+
+    private void failAudioStreaming(String message, boolean cleanupFile) {
+        synchronized (audioStreamLock) {
+            audioUploadFailed = true;
+            audioUploadInProgress = false;
+            audioCaptureCompleted = true;
+            audioStreamLock.notifyAll();
+        }
+        if (cleanupFile) {
+            cleanupPendingAudioFile();
+        }
+        runOnUiThread(() -> {
+            binding.recordAudioButton.setEnabled(true);
+            binding.recordAudioButton.setText(R.string.record_audio);
+            if (audioRecordingActive) {
+                cancelAudioRecording();
+            }
+            showError(message);
+        });
+    }
+
+    private void joinAudioUploadThread() {
+        if (audioUploadThread == null) {
+            return;
+        }
+        try {
+            audioUploadThread.join(AUDIO_THREAD_JOIN_TIMEOUT_MS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (!audioUploadThread.isAlive()) {
+                audioUploadThread = null;
+            }
+        }
+    }
+
+    private boolean isAudioUploadThreadBusy() {
+        return audioUploadThread != null && audioUploadThread.isAlive();
     }
 
     private MultipartBody.Part buildAudioChunkPart(byte[] bytes, int chunkIndex, boolean finalChunk) {
@@ -884,6 +999,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             pendingAudioFile.delete();
         }
         pendingAudioFile = null;
+    }
+
+    private static final class AudioChunkPlan {
+        private final long offset;
+        private final int size;
+        private final int chunkIndex;
+        private final boolean finalChunk;
+
+        private AudioChunkPlan(long offset, int size, int chunkIndex, boolean finalChunk) {
+            this.offset = offset;
+            this.size = size;
+            this.chunkIndex = chunkIndex;
+            this.finalChunk = finalChunk;
+        }
     }
 
     private void uploadImageBytes(String prompt, byte[] bytes, String fileName, String mimeType) {
