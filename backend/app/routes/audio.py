@@ -13,6 +13,7 @@ from ..domain.runtime_models import ArtifactType, RunStatus
 from ..models import AudioChunkUploadResponse, ChatResponse
 from ..orchestration.planner import build_default_plan
 from ..runtime import QueueFullError, scheduler
+from ..runtime_profiles import get_runtime_profile
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.media_window_service import media_window_service
@@ -115,6 +116,7 @@ async def analyze_audio(
     session_id: str | None = Form(default=None),
     window_started_at_ms: int | None = Form(default=None),
     window_ended_at_ms: int | None = Form(default=None),
+    capture_profile: str | None = Form(default=None),
 ) -> ChatResponse:
     if not audio.filename:
         raise HTTPException(status_code=400, detail="Missing audio filename")
@@ -127,6 +129,7 @@ async def analyze_audio(
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     stored = UPLOADS_DIR / f"{uuid.uuid4().hex[:12]}{suffix}"
     await write_bytes(stored, payload)
+    runtime_profile = get_runtime_profile(capture_profile)
 
     plan = build_default_plan(user_message=prompt, has_audio=True)
     handle = await asyncio.to_thread(
@@ -140,6 +143,7 @@ async def analyze_audio(
             "audio_path": str(stored.resolve()),
             "window_started_at_ms": window_started_at_ms,
             "window_ended_at_ms": window_ended_at_ms,
+            "capture_profile": runtime_profile.profile_id,
         },
         plan=plan,
     )
@@ -151,6 +155,7 @@ async def analyze_audio(
             upload_id=stored.stem,
             audio_path=str(stored.resolve()),
             audio_format=suffix.lstrip("."),
+            capture_profile=runtime_profile.profile_id,
             prompt=prompt,
             run_id=handle.run_id,
             started_at_ms=window_started_at_ms,
@@ -170,6 +175,7 @@ async def analyze_audio(
                 "started_at_ms": window_started_at_ms,
                 "ended_at_ms": window_ended_at_ms,
                 "audio_path": str(stored.resolve()),
+                "capture_profile": runtime_profile.profile_id,
                 "alignment_mode": "direct_audio",
             },
             user_id=DEMO_USER_ID,
@@ -184,6 +190,7 @@ async def analyze_audio(
                 "started_at_ms": window_started_at_ms,
                 "ended_at_ms": window_ended_at_ms,
                 "audio_path": str(stored.resolve()),
+                "capture_profile": runtime_profile.profile_id,
             },
             user_id=DEMO_USER_ID,
         )
@@ -231,6 +238,7 @@ async def upload_audio_chunk(
     audio_format: str = Form(default="binary"),
     window_started_at_ms: int | None = Form(default=None),
     window_ended_at_ms: int | None = Form(default=None),
+    capture_profile: str | None = Form(default=None),
 ) -> AudioChunkUploadResponse:
     if chunk_index < 0:
         raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
@@ -239,6 +247,7 @@ async def upload_audio_chunk(
 
     validated_ext = _validated_audio_ext(audio_ext)
     validated_format = _validated_audio_format(audio_format)
+    runtime_profile = get_runtime_profile(capture_profile)
     payload = await read_bounded_bytes(audio)
     chunk_dir = AUDIO_CHUNK_DIR / upload_id
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +286,7 @@ async def upload_audio_chunk(
             "audio_format": validated_format,
             "window_started_at_ms": window_started_at_ms,
             "window_ended_at_ms": window_ended_at_ms,
+            "capture_profile": runtime_profile.profile_id,
         },
         plan=plan,
     )
@@ -286,6 +296,7 @@ async def upload_audio_chunk(
         upload_id=upload_id,
         audio_path=str(stored.resolve()),
         audio_format=validated_format,
+        capture_profile=runtime_profile.profile_id,
         prompt=prompt,
         run_id=handle.run_id,
         started_at_ms=window_started_at_ms,
@@ -307,6 +318,7 @@ async def upload_audio_chunk(
             "ended_at_ms": window_ended_at_ms,
             "audio_format": validated_format,
             "audio_path": str(stored.resolve()),
+            "capture_profile": runtime_profile.profile_id,
             "alignment_mode": "chunked_audio",
         },
         user_id=DEMO_USER_ID,
@@ -322,6 +334,7 @@ async def upload_audio_chunk(
             "started_at_ms": window_started_at_ms,
             "ended_at_ms": window_ended_at_ms,
             "audio_format": validated_format,
+            "capture_profile": runtime_profile.profile_id,
         },
         user_id=DEMO_USER_ID,
     )

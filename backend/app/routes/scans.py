@@ -7,17 +7,12 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from ..agent import core as agent_core
-from ..config import (
-    ALIGNMENT_FUTURE_TOLERANCE_MS,
-    ALIGNMENT_MAX_AUDIO_WINDOWS,
-    ALIGNMENT_WINDOW_MS,
-    DEMO_USER_ID,
-    UPLOADS_DIR,
-)
+from ..config import DEMO_USER_ID, UPLOADS_DIR
 from ..domain.runtime_models import ArtifactType, RunStatus
 from ..models import ChatResponse
 from ..orchestration.planner import build_default_plan
 from ..runtime import QueueFullError, scheduler
+from ..runtime_profiles import get_runtime_profile
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.media_window_service import media_window_service
@@ -57,6 +52,7 @@ async def analyze_scene(
     session_id: str | None = Form(default=None),
     visible_text: str | None = Form(default=None),
     captured_at_ms: int | None = Form(default=None),
+    capture_profile: str | None = Form(default=None),
 ) -> ChatResponse:
     if not image.filename:
         raise HTTPException(status_code=400, detail="Missing image filename")
@@ -70,15 +66,22 @@ async def analyze_scene(
     stored = UPLOADS_DIR / f"{uuid.uuid4().hex[:12]}{suffix}"
     await write_bytes(stored, payload)
     effective_session_id = session_id or uuid.uuid4().hex[:12]
-    interval_start_ms = captured_at_ms - ALIGNMENT_WINDOW_MS if captured_at_ms is not None else None
-    interval_end_ms = captured_at_ms + ALIGNMENT_FUTURE_TOLERANCE_MS if captured_at_ms is not None else None
+    runtime_profile = get_runtime_profile(capture_profile)
+    interval_start_ms = (
+        captured_at_ms - runtime_profile.alignment_window_ms
+        if captured_at_ms is not None else None
+    )
+    interval_end_ms = (
+        captured_at_ms + runtime_profile.alignment_future_tolerance_ms
+        if captured_at_ms is not None else None
+    )
     aligned_audio_windows = await asyncio.to_thread(
         media_window_service.list_audio_windows_for_interval,
         effective_session_id,
         interval_start_ms=interval_start_ms,
         interval_end_ms=interval_end_ms,
-        max_gap_ms=ALIGNMENT_WINDOW_MS,
-        limit=ALIGNMENT_MAX_AUDIO_WINDOWS,
+        max_gap_ms=runtime_profile.alignment_window_ms,
+        limit=runtime_profile.alignment_max_audio_windows,
     )
     aligned_audio_paths: list[str] = []
     aligned_audio_window_records: list[dict[str, object]] = []
@@ -112,6 +115,7 @@ async def analyze_scene(
             "run_id": aligned_audio_window.get("run_id"),
             "started_at_ms": aligned_audio_window.get("started_at_ms"),
             "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
+            "capture_profile": aligned_audio_window.get("capture_profile"),
             "gap_ms": aligned_audio_window.get("gap_ms"),
             "overlap_ms": aligned_audio_window.get("overlap_ms"),
             "alignment_mode": aligned_audio_window.get("alignment_mode"),
@@ -137,9 +141,11 @@ async def analyze_scene(
             "visible_text_hint": visible_text,
             "image_path": str(stored.resolve()),
             "captured_at_ms": captured_at_ms,
+            "capture_profile": runtime_profile.profile_id,
             "aligned_audio_windows": aligned_audio_window_records,
-            "alignment_window_ms": ALIGNMENT_WINDOW_MS,
-            "alignment_future_tolerance_ms": ALIGNMENT_FUTURE_TOLERANCE_MS,
+            "alignment_window_ms": runtime_profile.alignment_window_ms,
+            "alignment_future_tolerance_ms": runtime_profile.alignment_future_tolerance_ms,
+            "alignment_max_audio_windows": runtime_profile.alignment_max_audio_windows,
             "transcript_reused_count": len(transcript_source_run_ids),
         },
         plan=plan,
@@ -154,10 +160,12 @@ async def analyze_scene(
             provider="session_audio_multimodal_window",
             content={
                 "captured_at_ms": captured_at_ms,
+                "capture_profile": runtime_profile.profile_id,
                 "window_start_ms": interval_start_ms,
                 "window_end_ms": interval_end_ms,
                 "audio_window_count": len(aligned_audio_window_records),
                 "audio_windows": aligned_audio_window_records,
+                "alignment_max_audio_windows": runtime_profile.alignment_max_audio_windows,
                 "transcript_reused_count": len(transcript_source_run_ids),
                 "transcript_source_run_ids": transcript_source_run_ids,
             },
@@ -170,9 +178,11 @@ async def analyze_scene(
             event_type="multimodal_window_aligned",
             detail={
                 "captured_at_ms": captured_at_ms,
+                "capture_profile": runtime_profile.profile_id,
                 "window_start_ms": interval_start_ms,
                 "window_end_ms": interval_end_ms,
                 "audio_window_count": len(aligned_audio_window_records),
+                "alignment_max_audio_windows": runtime_profile.alignment_max_audio_windows,
                 "transcript_reused_count": len(transcript_source_run_ids),
                 "transcript_source_run_ids": transcript_source_run_ids,
             },

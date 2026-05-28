@@ -72,23 +72,13 @@ import retrofit2.Callback;
 import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
-    private static final long LIVE_CAPTURE_INTERVAL_BASE_MS = 1800L;
-    private static final long LIVE_CAPTURE_INTERVAL_MIN_MS = 1200L;
-    private static final long LIVE_CAPTURE_INTERVAL_MAX_MS = 4200L;
-    private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
-    private static final long LIVE_CAPTURE_HEARTBEAT_MS = 6500L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
     private static final long AUDIO_THREAD_JOIN_TIMEOUT_MS = 1500L;
     private static final int LIVE_FRAME_HASH_GRID = 8;
-    private static final int LIVE_FRAME_HASH_DIFF_THRESHOLD = 8;
-    private static final int AUDIO_UPLOAD_CHUNK_BYTES = 32 * 1024;
     private static final int AUDIO_CAPTURE_READ_BYTES = 4096;
     private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
     private static final int AUDIO_CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
     private static final int AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT;
-    private static final int AUDIO_VAD_RMS_THRESHOLD = 950;
-    private static final int AUDIO_VAD_HANGOVER_FRAMES = 6;
-    private static final int AUDIO_VAD_PRE_ROLL_FRAMES = 2;
 
     private ActivityMainBinding binding;
     private SceneCopilotService service;
@@ -110,13 +100,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private int liveDroppedFrames;
     private int liveSuppressedFrames;
     private int liveTimedOutFrames;
-    private long liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
+    private long liveCaptureIntervalMs = CaptureProfile.BALANCED.liveBaseMs;
     private long liveCaptureStartedAtMs;
     private long liveCaptureDeadlineAtMs;
     private long lastLiveSubmittedAtMs;
     private long lastSubmittedFrameHash;
     private long pendingLiveFrameHash;
     private boolean hasSubmittedFrameHash;
+    private CaptureProfile activeCaptureProfile = CaptureProfile.BALANCED;
+    private CaptureProfile activeAudioCaptureProfile = CaptureProfile.BALANCED;
     private AudioRecord audioRecorder;
     private File pendingAudioFile;
     private boolean audioRecordingActive;
@@ -243,6 +235,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         binding.topAppBar.setSubtitle(getString(R.string.backend_url, ApiClient.baseUrl()));
         binding.promptInput.setText(getString(R.string.default_prompt));
         syncPreviewSurface();
+        binding.captureProfileToggleGroup.addOnButtonCheckedListener((group, checkedId, isChecked) -> {
+            if (!isChecked) {
+                return;
+            }
+            CaptureProfile selectedProfile = CaptureProfile.fromButtonId(checkedId);
+            if (selectedProfile != null) {
+                applyCaptureProfile(selectedProfile, true);
+            }
+        });
+        binding.captureProfileToggleGroup.check(activeCaptureProfile.buttonId);
+        renderCaptureProfileSummary();
         updateLiveScanButton();
 
         binding.pickImageButton.setOnClickListener(v -> {
@@ -314,6 +317,40 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (status == TextToSpeech.SUCCESS) {
             textToSpeech.setLanguage(Locale.US);
         }
+    }
+
+    private void applyCaptureProfile(CaptureProfile profile, boolean announce) {
+        if (profile == null) {
+            return;
+        }
+        boolean changed = activeCaptureProfile != profile;
+        activeCaptureProfile = profile;
+        if (!audioRecordingActive && !audioUploadInProgress && !isAudioUploadThreadBusy()) {
+            activeAudioCaptureProfile = profile;
+        }
+        liveCaptureIntervalMs = clampLiveCaptureInterval(profile.liveBaseMs);
+        renderCaptureProfileSummary();
+        if (liveModeEnabled) {
+            updateLiveStatsLabel();
+            scheduleNextLiveCapture();
+        }
+        if (announce && changed) {
+            binding.statusText.setText(getString(
+                    R.string.status_capture_profile_switched,
+                    profile.displayName(this)
+            ));
+        }
+    }
+
+    private void renderCaptureProfileSummary() {
+        binding.captureProfileSummaryText.setText(activeCaptureProfile.summary(this));
+    }
+
+    private long clampLiveCaptureInterval(long candidateMs) {
+        return Math.max(
+                activeCaptureProfile.liveMinMs,
+                Math.min(activeCaptureProfile.liveMaxMs, candidateMs)
+        );
     }
 
     private void submitCurrentRequest() {
@@ -405,6 +442,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         int bufferSize = Math.max(minBufferSize * 2, AUDIO_CAPTURE_READ_BYTES * 4);
+        activeAudioCaptureProfile = activeCaptureProfile;
         pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".pcm");
         String prompt = currentAudioPrompt();
         String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
@@ -488,6 +526,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         binding.recordAudioButton.setText(R.string.record_audio);
         binding.recordAudioButton.setEnabled(true);
         audioPushToTalkMode = false;
+        activeAudioCaptureProfile = activeCaptureProfile;
     }
 
     private void releaseAudioRecorder() {
@@ -501,7 +540,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void startAudioCaptureThread(int bufferSize, File audioFile) {
         audioCaptureThread = new Thread(() -> {
             byte[] buffer = new byte[bufferSize];
-            byte[] preRollBuffer = new byte[bufferSize * AUDIO_VAD_PRE_ROLL_FRAMES];
+            CaptureProfile audioProfile = activeAudioCaptureProfile;
+            byte[] preRollBuffer = new byte[bufferSize * audioProfile.audioVadPreRollFrames];
             int preRollSize = 0;
             int speechHangoverFrames = 0;
             try (FileOutputStream outputStream = new FileOutputStream(audioFile, false)) {
@@ -518,7 +558,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                             markAudioSpeechDetected();
                             outputStream.write(buffer, 0, read);
                             noteAudioBytesCaptured(read);
-                            speechHangoverFrames = AUDIO_VAD_HANGOVER_FRAMES;
+                            speechHangoverFrames = audioProfile.audioVadHangoverFrames;
                         } else if (audioSpeechDetected && speechHangoverFrames > 0) {
                             outputStream.write(buffer, 0, read);
                             noteAudioBytesCaptured(read);
@@ -570,7 +610,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             sumSquares += value * value;
         }
         double rms = Math.sqrt(sumSquares / (double) sampleCount);
-        return rms >= AUDIO_VAD_RMS_THRESHOLD;
+        return rms >= activeAudioCaptureProfile.audioVadRmsThreshold;
     }
 
     private int appendPreRollFrame(byte[] preRollBuffer, int currentSize, byte[] buffer, int read) {
@@ -622,7 +662,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveDroppedFrames = 0;
         liveSuppressedFrames = 0;
         liveTimedOutFrames = 0;
-        liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
+        liveCaptureIntervalMs = activeCaptureProfile.liveBaseMs;
         liveCaptureStartedAtMs = 0L;
         liveCaptureDeadlineAtMs = 0L;
         lastLiveSubmittedAtMs = 0L;
@@ -798,15 +838,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveDroppedFrames,
                 liveTimedOutFrames,
                 liveSuppressedFrames,
-                liveCaptureIntervalMs / 1000.0
+                liveCaptureIntervalMs / 1000.0,
+                activeCaptureProfile.displayName(this)
         ));
     }
 
     private void increaseLiveCadencePressure(boolean timeoutTriggered) {
         long previous = liveCaptureIntervalMs;
-        liveCaptureIntervalMs = Math.min(
-                LIVE_CAPTURE_INTERVAL_MAX_MS,
-                liveCaptureIntervalMs + LIVE_CAPTURE_INTERVAL_STEP_MS
+        liveCaptureIntervalMs = clampLiveCaptureInterval(
+                liveCaptureIntervalMs + activeCaptureProfile.liveStepMs
         );
         if (liveModeEnabled && liveCaptureIntervalMs > previous) {
             binding.statusText.setText(timeoutTriggered
@@ -817,9 +857,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void relaxLiveCadence() {
         long previous = liveCaptureIntervalMs;
-        liveCaptureIntervalMs = Math.max(
-                LIVE_CAPTURE_INTERVAL_MIN_MS,
-                liveCaptureIntervalMs - LIVE_CAPTURE_INTERVAL_STEP_MS
+        liveCaptureIntervalMs = clampLiveCaptureInterval(
+                liveCaptureIntervalMs - activeCaptureProfile.liveStepMs
         );
         if (liveModeEnabled && liveCaptureIntervalMs < previous) {
             binding.statusText.setText(R.string.status_live_speeding_up);
@@ -828,9 +867,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void increaseLiveCadenceForStableScene() {
         long previous = liveCaptureIntervalMs;
-        liveCaptureIntervalMs = Math.min(
-                LIVE_CAPTURE_INTERVAL_MAX_MS,
-                liveCaptureIntervalMs + LIVE_CAPTURE_INTERVAL_STEP_MS
+        liveCaptureIntervalMs = clampLiveCaptureInterval(
+                liveCaptureIntervalMs + activeCaptureProfile.liveStepMs
         );
         if (liveModeEnabled && liveCaptureIntervalMs > previous) {
             binding.statusText.setText(R.string.status_live_scene_stable);
@@ -841,12 +879,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         long frameHash = computeFrameHash(payload);
         long nowMs = System.currentTimeMillis();
         boolean heartbeatDue = lastLiveSubmittedAtMs <= 0L
-                || (nowMs - lastLiveSubmittedAtMs) >= LIVE_CAPTURE_HEARTBEAT_MS;
+                || (nowMs - lastLiveSubmittedAtMs) >= activeCaptureProfile.liveHeartbeatMs;
         if (!hasSubmittedFrameHash || heartbeatDue) {
             return new LiveFrameDecision(true, frameHash);
         }
         int diff = Long.bitCount(frameHash ^ lastSubmittedFrameHash);
-        boolean changedEnough = diff >= LIVE_FRAME_HASH_DIFF_THRESHOLD;
+        boolean changedEnough = diff >= activeCaptureProfile.frameHashDiffThreshold;
         return new LiveFrameDecision(changedEnough, frameHash);
     }
 
@@ -942,8 +980,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     String.valueOf(System.currentTimeMillis()),
                     MediaType.parse("text/plain")
             );
+            RequestBody captureProfileBody = RequestBody.create(
+                    activeCaptureProfile.wireId,
+                    MediaType.parse("text/plain")
+            );
 
-            service.analyzeScene(imagePart, promptBody, sessionBody, capturedAtBody).enqueue(new Callback<AcceptedResponse>() {
+            service.analyzeScene(
+                    imagePart,
+                    promptBody,
+                    sessionBody,
+                    capturedAtBody,
+                    captureProfileBody
+            ).enqueue(new Callback<AcceptedResponse>() {
                 @Override
                 public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                     if (!response.isSuccessful() || response.body() == null) {
@@ -1030,10 +1078,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     return null;
                 }
                 long availableBytes = audioRecordedBytes - audioUploadedBytes;
-                if (availableBytes >= AUDIO_UPLOAD_CHUNK_BYTES) {
+                if (availableBytes >= activeAudioCaptureProfile.audioUploadChunkBytes) {
                     return new AudioChunkPlan(
                             audioUploadedBytes,
-                            AUDIO_UPLOAD_CHUNK_BYTES,
+                            activeAudioCaptureProfile.audioUploadChunkBytes,
                             audioNextChunkIndex,
                             false
                     );
@@ -1079,6 +1127,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 String.valueOf(windowEndMs),
                 MediaType.parse("text/plain")
         );
+        RequestBody captureProfileBody = RequestBody.create(
+                activeAudioCaptureProfile.wireId,
+                MediaType.parse("text/plain")
+        );
 
         Response<AudioChunkUploadResponse> response = service.uploadAudioChunk(
                 audioPart,
@@ -1090,7 +1142,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 audioExtBody,
                 audioFormatBody,
                 windowStartedBody,
-                windowEndedBody
+                windowEndedBody,
+                captureProfileBody
         ).execute();
         if (!response.isSuccessful() || response.body() == null) {
             throw new IOException("HTTP " + response.code());
@@ -1220,6 +1273,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             pendingAudioFile.delete();
         }
         pendingAudioFile = null;
+        activeAudioCaptureProfile = activeCaptureProfile;
     }
 
     private String currentOrNewSessionId() {
@@ -1279,8 +1333,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 String.valueOf(System.currentTimeMillis()),
                 MediaType.parse("text/plain")
         );
+        RequestBody captureProfileBody = RequestBody.create(
+                activeCaptureProfile.wireId,
+                MediaType.parse("text/plain")
+        );
 
-        service.analyzeScene(imagePart, promptBody, sessionBody, capturedAtBody).enqueue(new Callback<AcceptedResponse>() {
+        service.analyzeScene(
+                imagePart,
+                promptBody,
+                sessionBody,
+                capturedAtBody,
+                captureProfileBody
+        ).enqueue(new Callback<AcceptedResponse>() {
             @Override
             public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {

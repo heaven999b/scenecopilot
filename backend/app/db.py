@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS audio_windows (
   prompt TEXT,
   audio_path TEXT NOT NULL,
   audio_format TEXT NOT NULL DEFAULT 'binary',
+  capture_profile TEXT NOT NULL DEFAULT 'balanced',
   started_at_ms INTEGER,
   ended_at_ms INTEGER,
   duration_ms INTEGER,
@@ -261,6 +262,7 @@ MIGRATIONS = (
     "ALTER TABLE chat_messages ADD COLUMN run_id TEXT REFERENCES runs(id)",
     "ALTER TABLE reasoning_events ADD COLUMN run_id TEXT REFERENCES runs(id)",
     "ALTER TABLE approval_records ADD COLUMN reviewer_note TEXT",
+    "ALTER TABLE audio_windows ADD COLUMN capture_profile TEXT NOT NULL DEFAULT 'balanced'",
 )
 
 POST_MIGRATION_INDEXES = (

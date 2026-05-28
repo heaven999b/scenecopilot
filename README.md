@@ -19,6 +19,7 @@ It is built around three operator surfaces:
 - structured run artifacts, audit trail, approval records, and action cards
 - bounded scheduler with backpressure and run-scoped SSE streams
 - evaluation harness with latency, retrieval, OCR, and fallback metrics
+- capture profiles that switch client cadence, audio chunking, and backend alignment policy together
 
 ## Runtime Loop
 
@@ -130,6 +131,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - transcript reuse for aligned audio windows to reduce repeated ASR latency on nearby scene runs
 - sliding multimodal audio window selection for scene runs, including multi-window transcript aggregation when needed
 - adaptive live keyframe gating on Android so stable scenes are locally suppressed instead of repeatedly hitting the model
+- shared `Eco / Balanced / Expert` capture profiles that retune live cadence, heartbeat windows, VAD sensitivity, and audio chunk size without changing the backend contract
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search
@@ -165,6 +167,16 @@ This keeps the default stack portable while still allowing cloud-backed
 providers when you want higher-fidelity OCR or scene understanding.
 
 ## Runtime Profiles
+
+### Capture Modes
+
+SceneCopilot exposes the same capture profile in the Android client and browser
+deck, and the backend records it in run inputs, alignment artifacts, and audio
+window metadata.
+
+- `Eco`: slower heartbeat, stricter scene-change threshold, and larger audio chunks
+- `Balanced`: adaptive default for everyday field use
+- `Expert`: faster cadence, lower change threshold, smaller audio chunks, and denser alignment windows
 
 ### Offline-Ready Baseline
 

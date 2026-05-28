@@ -29,7 +29,8 @@ public interface SceneCopilotService {
             @Part MultipartBody.Part image,
             @Part("prompt") RequestBody prompt,
             @Part("session_id") RequestBody sessionId,
-            @Part("captured_at_ms") RequestBody capturedAtMs
+            @Part("captured_at_ms") RequestBody capturedAtMs,
+            @Part("capture_profile") RequestBody captureProfile
     );
 
     @Multipart
@@ -37,7 +38,8 @@ public interface SceneCopilotService {
     Call<AcceptedResponse> analyzeAudio(
             @Part MultipartBody.Part audio,
             @Part("prompt") RequestBody prompt,
-            @Part("session_id") RequestBody sessionId
+            @Part("session_id") RequestBody sessionId,
+            @Part("capture_profile") RequestBody captureProfile
     );
 
     @Multipart
@@ -52,7 +54,8 @@ public interface SceneCopilotService {
             @Part("audio_ext") RequestBody audioExt,
             @Part("audio_format") RequestBody audioFormat,
             @Part("window_started_at_ms") RequestBody windowStartedAtMs,
-            @Part("window_ended_at_ms") RequestBody windowEndedAtMs
+            @Part("window_ended_at_ms") RequestBody windowEndedAtMs,
+            @Part("capture_profile") RequestBody captureProfile
     );
 
     @GET("api/documents/search")

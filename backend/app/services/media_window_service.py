@@ -14,6 +14,7 @@ class MediaWindowService:
         upload_id: str,
         audio_path: str,
         audio_format: str,
+        capture_profile: str = "balanced",
         prompt: str | None = None,
         run_id: str | None = None,
         started_at_ms: int | None = None,
@@ -28,8 +29,8 @@ class MediaWindowService:
                 """
                 INSERT INTO audio_windows
                   (user_id, session_id, run_id, upload_id, prompt, audio_path, audio_format,
-                   started_at_ms, ended_at_ms, duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   capture_profile, started_at_ms, ended_at_ms, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -39,6 +40,7 @@ class MediaWindowService:
                     prompt,
                     audio_path,
                     audio_format,
+                    capture_profile,
                     started_at_ms,
                     ended_at_ms,
                     duration_ms,
@@ -51,7 +53,7 @@ class MediaWindowService:
         try:
             rows = conn.execute(
                 """
-                SELECT id, session_id, run_id, upload_id, prompt, audio_path, audio_format,
+                SELECT id, session_id, run_id, upload_id, prompt, audio_path, audio_format, capture_profile,
                        started_at_ms, ended_at_ms, duration_ms, created_at
                 FROM audio_windows
                 WHERE session_id = ?

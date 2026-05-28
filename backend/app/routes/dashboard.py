@@ -23,6 +23,7 @@ from ..config import (
 )
 from ..db import get_conn, row_to_dict
 from ..runtime import scheduler
+from ..runtime_profiles import DEFAULT_CAPTURE_PROFILE, list_runtime_profiles
 from ..services.session_manager import session_manager
 
 router = APIRouter(tags=["dashboard"])
@@ -119,7 +120,7 @@ _DASHBOARD_HTML = """<!doctype html>
     }
     .field { display: grid; gap: 8px; margin-top: 12px; }
     label { color: var(--muted); font-size: 13px; }
-    input, textarea, button {
+    input, textarea, select, button {
       width: 100%;
       border-radius: 14px;
       border: 1px solid rgba(255,255,255,0.08);
@@ -242,6 +243,14 @@ _DASHBOARD_HTML = """<!doctype html>
               <div class="field">
                 <label for="sessionInput">Session ID (optional)</label>
                 <input id="sessionInput" placeholder="Reuse a session or leave blank" />
+              </div>
+              <div class="field">
+                <label for="captureProfileInput">Capture profile</label>
+                <select id="captureProfileInput">
+                  <option value="eco">Eco</option>
+                  <option value="balanced" selected>Balanced</option>
+                  <option value="expert">Expert</option>
+                </select>
               </div>
             </div>
             <div>
@@ -425,6 +434,11 @@ _DASHBOARD_HTML = """<!doctype html>
         { label: 'Knowledge path', value: `${summary.provider_profile.retrieval} + ${summary.provider_profile.embedding}`, hint: `${summary.provider_profile.chunk_size} token chunks · ${summary.provider_profile.vector_dims} dims` },
         { label: 'External search', value: summary.provider_profile.external_search_enabled ? 'enabled' : 'disabled', hint: summary.provider_profile.external_search_enabled ? summary.provider_profile.external_search_provider : 'local-only retrieval' },
         { label: 'Event bus', value: `${summary.system_metrics.event_bus.session_subscribers} subscribers`, hint: `${summary.system_metrics.event_bus.buffered_events} buffered events` },
+        ...summary.capture_profiles.map((item) => ({
+          label: `Capture mode · ${item.display_name}`,
+          value: `${item.alignment_window_ms} ms window`,
+          hint: `${item.summary} Up to ${item.alignment_max_audio_windows} aligned audio windows.`,
+        })),
       ], (item) => `
         <div class="item">
           <strong>${item.label}</strong>
@@ -581,6 +595,7 @@ _DASHBOARD_HTML = """<!doctype html>
     async function launchRun() {
       const prompt = qs('promptInput').value.trim();
       const sessionId = qs('sessionInput').value.trim();
+      const captureProfile = qs('captureProfileInput').value || 'balanced';
       const image = qs('scanImage').files[0];
       const visibleText = qs('visibleTextInput').value.trim();
       qs('launchStatus').textContent = 'Submitting run...';
@@ -593,6 +608,7 @@ _DASHBOARD_HTML = """<!doctype html>
         if (sessionId) form.append('session_id', sessionId);
         if (visibleText) form.append('visible_text', visibleText);
         form.append('captured_at_ms', String(Date.now()));
+        form.append('capture_profile', captureProfile);
         payload = await fetchJson('/api/scans/analyze', { method: 'POST', body: form });
       } else {
         payload = await fetchJson('/api/chat', {
@@ -601,7 +617,7 @@ _DASHBOARD_HTML = """<!doctype html>
           body: JSON.stringify({ message: prompt, session_id: sessionId || null }),
         });
       }
-      qs('launchStatus').textContent = `Queued run ${payload.run_id} at position ${payload.queue_position}`;
+      qs('launchStatus').textContent = `Queued ${captureProfile} run ${payload.run_id} at position ${payload.queue_position}`;
       qs('sessionInput').value = payload.session_id;
       await selectRun(payload.run_id, payload.session_id);
       await refreshDashboard();
@@ -754,5 +770,7 @@ async def dashboard_summary() -> dict[str, object]:
         "recent_runs": recent_runs,
         "system_metrics": system_metrics,
         "provider_profile": _provider_profile(),
+        "capture_profiles": [profile.as_dict() for profile in list_runtime_profiles()],
+        "default_capture_profile": DEFAULT_CAPTURE_PROFILE,
         "latest_eval": _load_latest_eval(),
     }

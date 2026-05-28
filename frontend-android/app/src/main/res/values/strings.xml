@@ -81,8 +81,17 @@
     <string name="voice_prompt_missing">No speech recognizer is available on this device.</string>
     <string name="voice_prompt_empty">No voice prompt was captured.</string>
     <string name="live_frame_stats">Live frames: %1$d submitted · %2$d dropped</string>
-    <string name="live_frame_stats_extended">Live frames: %1$d submitted · %2$d dropped · %3$d timed out · %4$d suppressed · %5$.1fs cadence</string>
+    <string name="live_frame_stats_extended">Live frames · %6$s: %1$d submitted · %2$d dropped · %3$d timed out · %4$d suppressed · %5$.1fs cadence</string>
     <string name="live_surface_description">Live camera preview</string>
     <string name="live_capture_title">Live Capture</string>
-    <string name="live_capture_description">Back camera preview with periodic keyframe capture. New frames are dropped while the current run is still processing.</string>
+    <string name="live_capture_description">Back camera preview with adaptive keyframe capture. Stable scenes are suppressed on device, and each mode changes how aggressively frames and audio chunks are forwarded.</string>
+    <string name="capture_profile_title">Capture Profile</string>
+    <string name="capture_profile_eco">Eco</string>
+    <string name="capture_profile_balanced">Balanced</string>
+    <string name="capture_profile_expert">Expert</string>
+    <string name="capture_profile_eco_hint">Longer heartbeats, higher scene-change threshold, and larger audio chunks for battery-sensitive sessions.</string>
+    <string name="capture_profile_balanced_hint">Adaptive default for everyday inspection with moderate cadence and medium multimodal windows.</string>
+    <string name="capture_profile_expert_hint">Shorter heartbeats, more sensitive scene-change detection, and smaller audio chunks for aggressive realtime review.</string>
+    <string name="capture_profile_summary">Profile: %1$s. %2$s</string>
+    <string name="status_capture_profile_switched">Switched to %1$s capture profile.</string>
 </resources>
