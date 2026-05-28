@@ -130,7 +130,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - session-scoped temporal alignment between recent audio windows and captured live frames
 - transcript reuse for aligned audio windows to reduce repeated ASR latency on nearby scene runs
 - sliding multimodal audio window selection for scene runs, including multi-window transcript aggregation when needed
-- adaptive live keyframe gating on Android so stable scenes are locally suppressed instead of repeatedly hitting the model
+- adaptive live keyframe gating on Android so stable scenes are locally suppressed, while center reading regions and lower action bands can still trigger uploads on small but important changes
 - shared `Eco / Balanced / Expert` capture profiles that retune live cadence, heartbeat windows, VAD sensitivity, and audio chunk size without changing the backend contract
 - live SSE event stream
 - run detail inspection with artifacts and approvals

@@ -74,7 +74,16 @@ import retrofit2.Response;
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
     private static final long AUDIO_THREAD_JOIN_TIMEOUT_MS = 1500L;
+    private static final int LIVE_FRAME_ANALYSIS_SIZE = 24;
     private static final int LIVE_FRAME_HASH_GRID = 8;
+    private static final int FOCUS_REGION_LEFT = 4;
+    private static final int FOCUS_REGION_TOP = 4;
+    private static final int FOCUS_REGION_RIGHT = 20;
+    private static final int FOCUS_REGION_BOTTOM = 15;
+    private static final int ACTION_REGION_LEFT = 3;
+    private static final int ACTION_REGION_TOP = 13;
+    private static final int ACTION_REGION_RIGHT = 21;
+    private static final int ACTION_REGION_BOTTOM = 22;
     private static final int AUDIO_CAPTURE_READ_BYTES = 4096;
     private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
     private static final int AUDIO_CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
@@ -104,9 +113,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long liveCaptureStartedAtMs;
     private long liveCaptureDeadlineAtMs;
     private long lastLiveSubmittedAtMs;
-    private long lastSubmittedFrameHash;
-    private long pendingLiveFrameHash;
-    private boolean hasSubmittedFrameHash;
+    private FrameSignature lastSubmittedFrameSignature;
+    private FrameSignature pendingLiveFrameSignature;
     private CaptureProfile activeCaptureProfile = CaptureProfile.BALANCED;
     private CaptureProfile activeAudioCaptureProfile = CaptureProfile.BALANCED;
     private AudioRecord audioRecorder;
@@ -666,9 +674,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveCaptureStartedAtMs = 0L;
         liveCaptureDeadlineAtMs = 0L;
         lastLiveSubmittedAtMs = 0L;
-        lastSubmittedFrameHash = 0L;
-        pendingLiveFrameHash = 0L;
-        hasSubmittedFrameHash = false;
+        lastSubmittedFrameSignature = null;
+        pendingLiveFrameSignature = null;
         liveSessionId = currentSessionId != null && !currentSessionId.isEmpty()
                 ? currentSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
@@ -684,7 +691,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveCaptureInFlight = false;
         liveCaptureStartedAtMs = 0L;
         liveCaptureDeadlineAtMs = 0L;
-        pendingLiveFrameHash = 0L;
+        pendingLiveFrameSignature = null;
         stopLiveLoop();
         if (cameraProvider != null) {
             cameraProvider.unbindAll();
@@ -789,7 +796,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         });
                         return;
                     }
-                    pendingLiveFrameHash = frameDecision.frameHash;
+                    pendingLiveFrameSignature = frameDecision.frameSignature;
                     uploadImageBytes(
                             prompt,
                             payload,
@@ -876,30 +883,53 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private LiveFrameDecision decideLiveFrameUpload(byte[] payload) {
-        long frameHash = computeFrameHash(payload);
+        FrameSignature frameSignature = computeFrameSignature(payload);
         long nowMs = System.currentTimeMillis();
         boolean heartbeatDue = lastLiveSubmittedAtMs <= 0L
                 || (nowMs - lastLiveSubmittedAtMs) >= activeCaptureProfile.liveHeartbeatMs;
-        if (!hasSubmittedFrameHash || heartbeatDue) {
-            return new LiveFrameDecision(true, frameHash);
+        if (lastSubmittedFrameSignature == null || heartbeatDue) {
+            return new LiveFrameDecision(true, frameSignature);
         }
-        int diff = Long.bitCount(frameHash ^ lastSubmittedFrameHash);
-        boolean changedEnough = diff >= activeCaptureProfile.frameHashDiffThreshold;
-        return new LiveFrameDecision(changedEnough, frameHash);
+        int globalDiff = Long.bitCount(frameSignature.globalHash ^ lastSubmittedFrameSignature.globalHash);
+        if (globalDiff >= activeCaptureProfile.frameHashDiffThreshold) {
+            return new LiveFrameDecision(true, frameSignature);
+        }
+
+        int focusDiff = Long.bitCount(frameSignature.focusHash ^ lastSubmittedFrameSignature.focusHash);
+        int actionDiff = Long.bitCount(frameSignature.actionHash ^ lastSubmittedFrameSignature.actionHash);
+        int focusEdgeDelta = Math.abs(frameSignature.focusEdgeScore - lastSubmittedFrameSignature.focusEdgeScore);
+        int actionEdgeDelta = Math.abs(frameSignature.actionEdgeScore - lastSubmittedFrameSignature.actionEdgeScore);
+
+        boolean focusChanged = focusDiff >= activeCaptureProfile.focusHashDiffThreshold
+                || (focusDiff >= Math.max(1, activeCaptureProfile.focusHashDiffThreshold - 1)
+                && focusEdgeDelta >= activeCaptureProfile.edgeDeltaThreshold);
+        if (focusChanged) {
+            return new LiveFrameDecision(true, frameSignature);
+        }
+
+        boolean actionChanged = actionDiff >= activeCaptureProfile.actionHashDiffThreshold
+                || (actionDiff >= Math.max(1, activeCaptureProfile.actionHashDiffThreshold - 1)
+                && actionEdgeDelta >= activeCaptureProfile.edgeDeltaThreshold);
+        return new LiveFrameDecision(actionChanged, frameSignature);
     }
 
-    private long computeFrameHash(byte[] payload) {
+    private FrameSignature computeFrameSignature(byte[] payload) {
         Bitmap decoded = BitmapFactory.decodeByteArray(payload, 0, payload.length);
         if (decoded == null) {
-            return System.nanoTime();
+            long fallbackHash = System.nanoTime();
+            return new FrameSignature(fallbackHash, fallbackHash, fallbackHash, 0, 0);
         }
-        Bitmap scaled = Bitmap.createScaledBitmap(decoded, LIVE_FRAME_HASH_GRID, LIVE_FRAME_HASH_GRID, true);
+        Bitmap scaled = Bitmap.createScaledBitmap(
+                decoded,
+                LIVE_FRAME_ANALYSIS_SIZE,
+                LIVE_FRAME_ANALYSIS_SIZE,
+                true
+        );
         if (scaled != decoded) {
             decoded.recycle();
         }
         int width = scaled.getWidth();
         int height = scaled.getHeight();
-        long sum = 0L;
         int[] luminance = new int[width * height];
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
@@ -908,21 +938,129 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 int green = (pixel >> 8) & 0xFF;
                 int blue = pixel & 0xFF;
                 int gray = (red * 30 + green * 59 + blue * 11) / 100;
-                int index = y * width + x;
-                luminance[index] = gray;
-                sum += gray;
+                luminance[y * width + x] = gray;
             }
         }
         scaled.recycle();
-        int average = (int) (sum / Math.max(1, luminance.length));
+        return new FrameSignature(
+                regionHash(luminance, width, height, 0, 0, width, height),
+                regionHash(
+                        luminance,
+                        width,
+                        height,
+                        FOCUS_REGION_LEFT,
+                        FOCUS_REGION_TOP,
+                        FOCUS_REGION_RIGHT,
+                        FOCUS_REGION_BOTTOM
+                ),
+                regionHash(
+                        luminance,
+                        width,
+                        height,
+                        ACTION_REGION_LEFT,
+                        ACTION_REGION_TOP,
+                        ACTION_REGION_RIGHT,
+                        ACTION_REGION_BOTTOM
+                ),
+                regionEdgeScore(
+                        luminance,
+                        width,
+                        height,
+                        FOCUS_REGION_LEFT,
+                        FOCUS_REGION_TOP,
+                        FOCUS_REGION_RIGHT,
+                        FOCUS_REGION_BOTTOM
+                ),
+                regionEdgeScore(
+                        luminance,
+                        width,
+                        height,
+                        ACTION_REGION_LEFT,
+                        ACTION_REGION_TOP,
+                        ACTION_REGION_RIGHT,
+                        ACTION_REGION_BOTTOM
+                )
+        );
+    }
+
+    private long regionHash(
+            int[] luminance,
+            int width,
+            int height,
+            int left,
+            int top,
+            int right,
+            int bottom
+    ) {
+        int safeLeft = Math.max(0, Math.min(left, width - 1));
+        int safeTop = Math.max(0, Math.min(top, height - 1));
+        int safeRight = Math.max(safeLeft + 1, Math.min(right, width));
+        int safeBottom = Math.max(safeTop + 1, Math.min(bottom, height));
+        int[] buckets = new int[LIVE_FRAME_HASH_GRID * LIVE_FRAME_HASH_GRID];
+        long sum = 0L;
+        for (int gridY = 0; gridY < LIVE_FRAME_HASH_GRID; gridY++) {
+            int cellTop = safeTop + (safeBottom - safeTop) * gridY / LIVE_FRAME_HASH_GRID;
+            int cellBottom = safeTop + (safeBottom - safeTop) * (gridY + 1) / LIVE_FRAME_HASH_GRID;
+            cellBottom = Math.max(cellTop + 1, Math.min(cellBottom, safeBottom));
+            for (int gridX = 0; gridX < LIVE_FRAME_HASH_GRID; gridX++) {
+                int cellLeft = safeLeft + (safeRight - safeLeft) * gridX / LIVE_FRAME_HASH_GRID;
+                int cellRight = safeLeft + (safeRight - safeLeft) * (gridX + 1) / LIVE_FRAME_HASH_GRID;
+                cellRight = Math.max(cellLeft + 1, Math.min(cellRight, safeRight));
+                int bucketSum = 0;
+                int count = 0;
+                for (int y = cellTop; y < cellBottom; y++) {
+                    int rowOffset = y * width;
+                    for (int x = cellLeft; x < cellRight; x++) {
+                        bucketSum += luminance[rowOffset + x];
+                        count += 1;
+                    }
+                }
+                int bucketAverage = count > 0 ? bucketSum / count : 0;
+                int bucketIndex = gridY * LIVE_FRAME_HASH_GRID + gridX;
+                buckets[bucketIndex] = bucketAverage;
+                sum += bucketAverage;
+            }
+        }
+        int average = (int) (sum / Math.max(1, buckets.length));
         long hash = 0L;
-        for (int gray : luminance) {
+        for (int gray : buckets) {
             hash <<= 1;
             if (gray >= average) {
                 hash |= 1L;
             }
         }
         return hash;
+    }
+
+    private int regionEdgeScore(
+            int[] luminance,
+            int width,
+            int height,
+            int left,
+            int top,
+            int right,
+            int bottom
+    ) {
+        int safeLeft = Math.max(0, Math.min(left, width - 1));
+        int safeTop = Math.max(0, Math.min(top, height - 1));
+        int safeRight = Math.max(safeLeft + 1, Math.min(right, width));
+        int safeBottom = Math.max(safeTop + 1, Math.min(bottom, height));
+        long edgeSum = 0L;
+        int edgeCount = 0;
+        for (int y = safeTop; y < safeBottom - 1; y++) {
+            int rowOffset = y * width;
+            int nextRowOffset = (y + 1) * width;
+            for (int x = safeLeft; x < safeRight - 1; x++) {
+                int current = luminance[rowOffset + x];
+                edgeSum += Math.abs(current - luminance[rowOffset + x + 1]);
+                edgeSum += Math.abs(current - luminance[nextRowOffset + x]);
+                edgeCount += 2;
+            }
+        }
+        if (edgeCount == 0) {
+            return 0;
+        }
+        return (int) (edgeSum / edgeCount);
     }
 
     private void recoverLiveCaptureTimeout() {
@@ -1284,11 +1422,33 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private static final class LiveFrameDecision {
         private final boolean shouldUpload;
-        private final long frameHash;
+        private final FrameSignature frameSignature;
 
-        private LiveFrameDecision(boolean shouldUpload, long frameHash) {
+        private LiveFrameDecision(boolean shouldUpload, FrameSignature frameSignature) {
             this.shouldUpload = shouldUpload;
-            this.frameHash = frameHash;
+            this.frameSignature = frameSignature;
+        }
+    }
+
+    private static final class FrameSignature {
+        private final long globalHash;
+        private final long focusHash;
+        private final long actionHash;
+        private final int focusEdgeScore;
+        private final int actionEdgeScore;
+
+        private FrameSignature(
+                long globalHash,
+                long focusHash,
+                long actionHash,
+                int focusEdgeScore,
+                int actionEdgeScore
+        ) {
+            this.globalHash = globalHash;
+            this.focusHash = focusHash;
+            this.actionHash = actionHash;
+            this.focusEdgeScore = focusEdgeScore;
+            this.actionEdgeScore = actionEdgeScore;
         }
     }
 
@@ -1362,10 +1522,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 currentRunId = response.body().runId;
                 if (liveFrame) {
                     liveSessionId = response.body().sessionId;
-                    hasSubmittedFrameHash = true;
-                    lastSubmittedFrameHash = pendingLiveFrameHash;
+                    lastSubmittedFrameSignature = pendingLiveFrameSignature;
                     lastLiveSubmittedAtMs = System.currentTimeMillis();
-                    pendingLiveFrameHash = 0L;
+                    pendingLiveFrameSignature = null;
                     liveSubmittedFrames += 1;
                     if (response.body().queuePosition > 0) {
                         increaseLiveCadencePressure(false);
@@ -1385,7 +1544,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveCaptureInFlight = false;
                 liveCaptureStartedAtMs = 0L;
                 liveCaptureDeadlineAtMs = 0L;
-                pendingLiveFrameHash = 0L;
+                pendingLiveFrameSignature = null;
                 if (liveFrame) {
                     binding.statusText.setText(R.string.status_live_error);
                     return;

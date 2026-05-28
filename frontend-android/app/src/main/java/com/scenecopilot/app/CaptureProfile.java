@@ -16,6 +16,9 @@ public enum CaptureProfile {
             400L,
             9000L,
             10,
+            8,
+            7,
+            14,
             48 * 1024,
             1100,
             4,
@@ -32,6 +35,9 @@ public enum CaptureProfile {
             300L,
             6500L,
             8,
+            6,
+            5,
+            10,
             32 * 1024,
             950,
             6,
@@ -48,6 +54,9 @@ public enum CaptureProfile {
             250L,
             3500L,
             6,
+            4,
+            4,
+            7,
             24 * 1024,
             850,
             8,
@@ -64,6 +73,9 @@ public enum CaptureProfile {
     public final long liveStepMs;
     public final long liveHeartbeatMs;
     public final int frameHashDiffThreshold;
+    public final int focusHashDiffThreshold;
+    public final int actionHashDiffThreshold;
+    public final int edgeDeltaThreshold;
     public final int audioUploadChunkBytes;
     public final int audioVadRmsThreshold;
     public final int audioVadHangoverFrames;
@@ -80,6 +92,9 @@ public enum CaptureProfile {
             long liveStepMs,
             long liveHeartbeatMs,
             int frameHashDiffThreshold,
+            int focusHashDiffThreshold,
+            int actionHashDiffThreshold,
+            int edgeDeltaThreshold,
             int audioUploadChunkBytes,
             int audioVadRmsThreshold,
             int audioVadHangoverFrames,
@@ -95,6 +110,9 @@ public enum CaptureProfile {
         this.liveStepMs = liveStepMs;
         this.liveHeartbeatMs = liveHeartbeatMs;
         this.frameHashDiffThreshold = frameHashDiffThreshold;
+        this.focusHashDiffThreshold = focusHashDiffThreshold;
+        this.actionHashDiffThreshold = actionHashDiffThreshold;
+        this.edgeDeltaThreshold = edgeDeltaThreshold;
         this.audioUploadChunkBytes = audioUploadChunkBytes;
         this.audioVadRmsThreshold = audioVadRmsThreshold;
         this.audioVadHangoverFrames = audioVadHangoverFrames;
