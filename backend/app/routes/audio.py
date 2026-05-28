@@ -18,7 +18,7 @@ from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.media_window_service import media_window_service
 from ..services.session_manager import session_manager
-from ..storage import read_bounded_bytes, write_bytes
+from ..storage import copy_upload_to_path
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 
@@ -72,26 +72,24 @@ def _assemble_chunked_audio(*, upload_id: str, audio_ext: str, final_chunk_index
 
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     assembled = UPLOADS_DIR / f"{upload_id}{audio_ext}"
-    combined = bytearray()
-    for part in part_paths:
-        combined.extend(part.read_bytes())
     with assembled.open("wb") as output:
         if audio_format == "pcm16le_mono_16000":
             if audio_ext != ".wav":
                 raise HTTPException(status_code=400, detail="pcm16le_mono_16000 chunks must assemble into .wav")
-            output.write(_wav_wrap(bytes(combined), sample_rate=16000, channels=1, bits_per_sample=16))
-        else:
-            output.write(combined)
+            data_size = sum(part.stat().st_size for part in part_paths)
+            output.write(_wav_header(data_size, sample_rate=16000, channels=1, bits_per_sample=16))
+        for part in part_paths:
+            with part.open("rb") as handle:
+                shutil.copyfileobj(handle, output, length=1024 * 1024)
     shutil.rmtree(chunk_dir, ignore_errors=True)
     return assembled
 
 
-def _wav_wrap(payload: bytes, *, sample_rate: int, channels: int, bits_per_sample: int) -> bytes:
+def _wav_header(data_size: int, *, sample_rate: int, channels: int, bits_per_sample: int) -> bytes:
     byte_rate = sample_rate * channels * bits_per_sample // 8
     block_align = channels * bits_per_sample // 8
-    data_size = len(payload)
     riff_size = 36 + data_size
-    header = (
+    return (
         b"RIFF"
         + riff_size.to_bytes(4, "little")
         + b"WAVE"
@@ -106,7 +104,6 @@ def _wav_wrap(payload: bytes, *, sample_rate: int, channels: int, bits_per_sampl
         + b"data"
         + data_size.to_bytes(4, "little")
     )
-    return header + payload
 
 
 @router.post("/analyze", response_model=ChatResponse)
@@ -125,10 +122,9 @@ async def analyze_audio(
     if suffix not in _ALLOWED_AUDIO_SUFFIXES:
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
-    payload = await read_bounded_bytes(audio)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     stored = UPLOADS_DIR / f"{uuid.uuid4().hex[:12]}{suffix}"
-    await write_bytes(stored, payload)
+    await copy_upload_to_path(audio, stored)
     runtime_profile = get_runtime_profile(capture_profile)
 
     plan = build_default_plan(user_message=prompt, has_audio=True)
@@ -248,11 +244,10 @@ async def upload_audio_chunk(
     validated_ext = _validated_audio_ext(audio_ext)
     validated_format = _validated_audio_format(audio_format)
     runtime_profile = get_runtime_profile(capture_profile)
-    payload = await read_bounded_bytes(audio)
     chunk_dir = AUDIO_CHUNK_DIR / upload_id
     chunk_dir.mkdir(parents=True, exist_ok=True)
     chunk_path = chunk_dir / f"{chunk_index:06d}.part"
-    await write_bytes(chunk_path, payload)
+    await copy_upload_to_path(audio, chunk_path)
 
     effective_session_id = session_id or uuid.uuid4().hex[:12]
     if not final_chunk:

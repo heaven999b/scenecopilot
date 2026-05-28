@@ -10,17 +10,17 @@ from ..agent.tools import docs as docs_tool
 from ..config import DEMO_USER_ID, UPLOADS_DIR
 from ..db import conn_ctx
 from ..models import DocumentSearchResponse, DocumentUploadResponse
-from ..storage import read_bounded_bytes, write_bytes
+from ..storage import copy_upload_to_path
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
-def _extract_text(upload: UploadFile, raw: bytes) -> str:
+def _extract_text(upload: UploadFile, source_path: Path) -> str:
     suffix = Path(upload.filename or "").suffix.lower()
     if upload.content_type and upload.content_type.startswith("text/"):
-        return raw.decode("utf-8", errors="ignore")
+        return source_path.read_text(encoding="utf-8", errors="ignore")
     if suffix in {".txt", ".md", ".json"}:
-        return raw.decode("utf-8", errors="ignore")
+        return source_path.read_text(encoding="utf-8", errors="ignore")
     return (
         "Binary document uploaded successfully. Add a parser or OCR engine here "
         "to extract text from PDFs, images, or office files in production."
@@ -36,12 +36,11 @@ async def upload_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    raw = await read_bounded_bytes(file)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = f"{uuid.uuid4().hex[:8]}_{Path(file.filename).name}"
     dest = UPLOADS_DIR / safe_name
-    await write_bytes(dest, raw)
-    text = _extract_text(file, raw)
+    await copy_upload_to_path(file, dest)
+    text = _extract_text(file, dest)
     doc_title = title or Path(file.filename).stem
     parsed_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
     summary = text.splitlines()[0].strip() if text.strip() else doc_title

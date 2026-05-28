@@ -17,7 +17,7 @@ from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.media_window_service import media_window_service
 from ..services.session_manager import session_manager
-from ..storage import read_bounded_bytes, write_bytes
+from ..storage import copy_upload_to_path
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -61,10 +61,9 @@ async def analyze_scene(
     if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
         raise HTTPException(status_code=400, detail="Only image uploads are supported here")
 
-    payload = await read_bounded_bytes(image)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     stored = UPLOADS_DIR / f"{uuid.uuid4().hex[:12]}{suffix}"
-    await write_bytes(stored, payload)
+    await copy_upload_to_path(image, stored)
     effective_session_id = session_id or uuid.uuid4().hex[:12]
     runtime_profile = get_runtime_profile(capture_profile)
     interval_start_ms = (

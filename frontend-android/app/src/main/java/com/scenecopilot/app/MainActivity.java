@@ -55,7 +55,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -782,8 +781,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                 try {
-                    byte[] payload = Files.readAllBytes(outputFile.toPath());
-                    LiveFrameDecision frameDecision = decideLiveFrameUpload(payload);
+                    LiveFrameDecision frameDecision = decideLiveFrameUpload(outputFile);
                     if (!frameDecision.shouldUpload) {
                         liveCaptureInFlight = false;
                         liveCaptureStartedAtMs = 0L;
@@ -797,9 +795,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         return;
                     }
                     pendingLiveFrameSignature = frameDecision.frameSignature;
-                    uploadImageBytes(
+                    uploadImageFile(
                             prompt,
-                            payload,
+                            outputFile,
                             "live_frame.jpg",
                             "image/jpeg",
                             sessionId,
@@ -810,10 +808,6 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     liveCaptureStartedAtMs = 0L;
                     liveCaptureDeadlineAtMs = 0L;
                     runOnUiThread(() -> binding.statusText.setText(R.string.status_live_error));
-                } finally {
-                    if (outputFile.exists()) {
-                        outputFile.delete();
-                    }
                 }
             }
 
@@ -882,8 +876,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
     }
 
-    private LiveFrameDecision decideLiveFrameUpload(byte[] payload) {
-        FrameSignature frameSignature = computeFrameSignature(payload);
+    private LiveFrameDecision decideLiveFrameUpload(File imageFile) throws IOException {
+        FrameSignature frameSignature = computeFrameSignature(imageFile);
         long nowMs = System.currentTimeMillis();
         boolean heartbeatDue = lastLiveSubmittedAtMs <= 0L
                 || (nowMs - lastLiveSubmittedAtMs) >= activeCaptureProfile.liveHeartbeatMs;
@@ -913,18 +907,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         return new LiveFrameDecision(actionChanged, frameSignature);
     }
 
-    private FrameSignature computeFrameSignature(byte[] payload) {
-        Bitmap decoded = BitmapFactory.decodeByteArray(payload, 0, payload.length);
+    private FrameSignature computeFrameSignature(File imageFile) throws IOException {
+        Bitmap decoded = decodeBitmapForAnalysis(imageFile);
         if (decoded == null) {
             long fallbackHash = System.nanoTime();
             return new FrameSignature(fallbackHash, fallbackHash, fallbackHash, 0, 0);
         }
-        Bitmap scaled = Bitmap.createScaledBitmap(
-                decoded,
-                LIVE_FRAME_ANALYSIS_SIZE,
-                LIVE_FRAME_ANALYSIS_SIZE,
-                true
-        );
+        Bitmap scaled = decoded.getWidth() == LIVE_FRAME_ANALYSIS_SIZE && decoded.getHeight() == LIVE_FRAME_ANALYSIS_SIZE
+                ? decoded
+                : Bitmap.createScaledBitmap(decoded, LIVE_FRAME_ANALYSIS_SIZE, LIVE_FRAME_ANALYSIS_SIZE, true);
         if (scaled != decoded) {
             decoded.recycle();
         }
@@ -1061,6 +1052,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return 0;
         }
         return (int) (edgeSum / edgeCount);
+    }
+
+    private Bitmap decodeBitmapForAnalysis(File imageFile) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(imageFile.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IOException("Could not decode image bounds");
+        }
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        decode.inSampleSize = calculateInSampleSize(bounds, LIVE_FRAME_ANALYSIS_SIZE, LIVE_FRAME_ANALYSIS_SIZE);
+        return BitmapFactory.decodeFile(imageFile.getAbsolutePath(), decode);
+    }
+
+    private int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+        int inSampleSize = 1;
+        int height = Math.max(1, options.outHeight);
+        int width = Math.max(1, options.outWidth);
+        while ((height / inSampleSize) > reqHeight * 2 || (width / inSampleSize) > reqWidth * 2) {
+            inSampleSize *= 2;
+        }
+        return Math.max(1, inSampleSize);
     }
 
     private void recoverLiveCaptureTimeout() {
@@ -1477,6 +1491,40 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         );
     }
 
+    private void uploadImageFile(
+            String prompt,
+            File imageFile,
+            String fileName,
+            String mimeType,
+            String sessionId,
+            boolean liveFrame
+    ) {
+        MultipartBody.Part imagePart = buildImagePart(imageFile, fileName, mimeType);
+        RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
+        currentSessionId = sessionId;
+        RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
+        RequestBody capturedAtBody = RequestBody.create(
+                String.valueOf(System.currentTimeMillis()),
+                MediaType.parse("text/plain")
+        );
+        RequestBody captureProfileBody = RequestBody.create(
+                activeCaptureProfile.wireId,
+                MediaType.parse("text/plain")
+        );
+
+        enqueueAnalyzeScene(
+                service.analyzeScene(
+                        imagePart,
+                        promptBody,
+                        sessionBody,
+                        capturedAtBody,
+                        captureProfileBody
+                ),
+                liveFrame,
+                imageFile
+        );
+    }
+
     private void uploadImageBytes(
             String prompt,
             byte[] bytes,
@@ -1498,19 +1546,32 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 MediaType.parse("text/plain")
         );
 
-        service.analyzeScene(
-                imagePart,
-                promptBody,
-                sessionBody,
-                capturedAtBody,
-                captureProfileBody
-        ).enqueue(new Callback<AcceptedResponse>() {
+        enqueueAnalyzeScene(
+                service.analyzeScene(
+                        imagePart,
+                        promptBody,
+                        sessionBody,
+                        capturedAtBody,
+                        captureProfileBody
+                ),
+                liveFrame,
+                null
+        );
+    }
+
+    private void enqueueAnalyzeScene(
+            Call<AcceptedResponse> request,
+            boolean liveFrame,
+            File cleanupFile
+    ) {
+        request.enqueue(new Callback<AcceptedResponse>() {
             @Override
             public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {
                     liveCaptureInFlight = false;
                     liveCaptureStartedAtMs = 0L;
                     liveCaptureDeadlineAtMs = 0L;
+                    cleanupFileQuietly(cleanupFile);
                     if (liveFrame) {
                         binding.statusText.setText(R.string.status_live_error);
                         return;
@@ -1536,6 +1597,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 } else {
                     binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
                 }
+                cleanupFileQuietly(cleanupFile);
                 startEventStream(response.body().sessionId, response.body().runId);
             }
 
@@ -1545,6 +1607,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveCaptureStartedAtMs = 0L;
                 liveCaptureDeadlineAtMs = 0L;
                 pendingLiveFrameSignature = null;
+                cleanupFileQuietly(cleanupFile);
                 if (liveFrame) {
                     binding.statusText.setText(R.string.status_live_error);
                     return;
@@ -1568,6 +1631,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         return buildImagePart(bytes, "scene_upload." + extension, mimeType);
     }
 
+    private MultipartBody.Part buildImagePart(File imageFile, String fileName, String mimeType) {
+        RequestBody body = RequestBody.create(imageFile, MediaType.parse(mimeType));
+        return MultipartBody.Part.createFormData("image", fileName, body);
+    }
+
     private MultipartBody.Part buildImagePart(byte[] bytes, String fileName, String mimeType) {
         RequestBody body = RequestBody.create(bytes, MediaType.parse(mimeType));
         return MultipartBody.Part.createFormData("image", fileName, body);
@@ -1585,6 +1653,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 outputStream.write(buffer, 0, read);
             }
             return outputStream.toByteArray();
+        }
+    }
+
+    private void cleanupFileQuietly(File file) {
+        if (file == null) {
+            return;
+        }
+        if (file.exists()) {
+            file.delete();
         }
     }
 

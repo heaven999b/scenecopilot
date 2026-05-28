@@ -10,25 +10,28 @@ from .config import UPLOAD_MAX_BYTES
 CHUNK_SIZE = 1024 * 1024
 
 
-async def read_bounded_bytes(upload: UploadFile) -> bytes:
-    parts: list[bytes] = []
+async def copy_upload_to_path(upload: UploadFile, path: Path) -> int:
     total = 0
+
+    def _prepare() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+
+    await asyncio.to_thread(_prepare)
     while True:
         chunk = await upload.read(CHUNK_SIZE)
         if not chunk:
             break
         total += len(chunk)
         if total > UPLOAD_MAX_BYTES:
+            await asyncio.to_thread(path.unlink, missing_ok=True)
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"Upload too large. Limit is {UPLOAD_MAX_BYTES} bytes.",
             )
-        parts.append(chunk)
-    return b"".join(parts)
-
-
-async def write_bytes(path: Path, payload: bytes) -> None:
-    await asyncio.to_thread(path.write_bytes, payload)
+        await append_bytes(path, chunk)
+    return total
 
 
 async def append_bytes(path: Path, payload: bytes) -> None:
