@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.speech.RecognizerIntent;
 import android.speech.tts.TextToSpeech;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Surface;
 import android.webkit.MimeTypeMap;
@@ -76,10 +77,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
     private static final long AUDIO_THREAD_JOIN_TIMEOUT_MS = 1500L;
-    private static final int AUDIO_UPLOAD_CHUNK_BYTES = 192 * 1024;
+    private static final int AUDIO_UPLOAD_CHUNK_BYTES = 32 * 1024;
+    private static final int AUDIO_CAPTURE_READ_BYTES = 4096;
     private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
     private static final int AUDIO_CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO;
     private static final int AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT;
+    private static final int AUDIO_VAD_RMS_THRESHOLD = 950;
+    private static final int AUDIO_VAD_HANGOVER_FRAMES = 6;
+    private static final int AUDIO_VAD_PRE_ROLL_FRAMES = 2;
 
     private ActivityMainBinding binding;
     private SceneCopilotService service;
@@ -117,6 +122,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private String activeAudioUploadId;
     private String activeAudioPrompt;
     private String activeAudioSessionId;
+    private boolean pendingPushToTalkPermissionRequest;
+    private boolean audioPushToTalkMode;
+    private boolean audioSpeechDetected;
     private Thread audioCaptureThread;
     private Thread audioUploadThread;
     private final Object audioStreamLock = new Object();
@@ -198,9 +206,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final ActivityResultLauncher<String> audioPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
                 if (granted) {
-                    startAudioRecording();
+                    startAudioRecording(pendingPushToTalkPermissionRequest);
+                    pendingPushToTalkPermissionRequest = false;
                     return;
                 }
+                pendingPushToTalkPermissionRequest = false;
                 binding.statusText.setText(R.string.status_audio_permission_denied);
             });
 
@@ -241,6 +251,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 binding.promptInput.setText(getString(R.string.quick_read_prompt)));
         binding.voicePromptButton.setOnClickListener(v -> launchVoicePrompt());
         binding.recordAudioButton.setOnClickListener(v -> toggleAudioRecording());
+        binding.recordAudioButton.setOnLongClickListener(v -> {
+            requestAudioRecordingStart(true);
+            return true;
+        });
+        binding.recordAudioButton.setOnTouchListener((v, event) -> handleAudioRecordButtonTouch(event));
         binding.analyzeButton.setOnClickListener(v -> submitCurrentRequest());
         binding.searchDocsButton.setOnClickListener(v -> searchDocuments());
         binding.refreshRunButton.setOnClickListener(v -> {
@@ -326,6 +341,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             stopAudioRecordingAndUpload();
             return;
         }
+        if (audioPushToTalkMode) {
+            return;
+        }
+        requestAudioRecordingStart(false);
+    }
+
+    private void requestAudioRecordingStart(boolean pushToTalkMode) {
+        if (audioRecordingActive) {
+            return;
+        }
         if (audioUploadInProgress || isAudioUploadThreadBusy()) {
             binding.statusText.setText(R.string.status_audio_stream_busy);
             return;
@@ -335,13 +360,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 == PackageManager.PERMISSION_GRANTED) {
-            startAudioRecording();
+            startAudioRecording(pushToTalkMode);
             return;
         }
+        pendingPushToTalkPermissionRequest = pushToTalkMode;
         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
     }
 
-    private void startAudioRecording() {
+    private boolean handleAudioRecordButtonTouch(MotionEvent event) {
+        if (!audioPushToTalkMode) {
+            return false;
+        }
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            stopAudioRecordingAndUpload();
+            return true;
+        }
+        return false;
+    }
+
+    private void startAudioRecording(boolean pushToTalkMode) {
         if (audioUploadInProgress || isAudioUploadThreadBusy()) {
             binding.statusText.setText(R.string.status_audio_stream_busy);
             return;
@@ -355,7 +393,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             showError(getString(R.string.status_audio_recording_failed));
             return;
         }
-        int bufferSize = Math.max(minBufferSize * 2, AUDIO_UPLOAD_CHUNK_BYTES / 2);
+        int bufferSize = Math.max(minBufferSize * 2, AUDIO_CAPTURE_READ_BYTES * 4);
         pendingAudioFile = new File(getCacheDir(), "audio_clip_" + System.currentTimeMillis() + ".pcm");
         String prompt = currentAudioPrompt();
         String sessionId = currentSessionId != null && !currentSessionId.isEmpty()
@@ -373,14 +411,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 throw new IllegalStateException("AudioRecord failed to initialize");
             }
             initializeAudioStreaming(prompt, sessionId);
+            audioPushToTalkMode = pushToTalkMode;
+            audioSpeechDetected = false;
             audioRecordingStopRequested = false;
             audioRecorder.startRecording();
             audioRecordingActive = true;
-            startAudioCaptureThread(bufferSize, pendingAudioFile);
+            startAudioCaptureThread(AUDIO_CAPTURE_READ_BYTES, pendingAudioFile);
             startAudioUploadThread(pendingAudioFile);
-            binding.recordAudioButton.setText(R.string.stop_recording);
+            binding.recordAudioButton.setText(pushToTalkMode
+                    ? R.string.release_to_send
+                    : R.string.stop_recording);
             binding.recordAudioButton.setEnabled(true);
-            binding.statusText.setText(R.string.status_recording_audio);
+            binding.statusText.setText(R.string.status_audio_waiting_speech);
             binding.selectedFileLabel.setText(R.string.audio_streaming_label);
         } catch (Exception exc) {
             cancelAudioRecording();
@@ -404,7 +446,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (pendingAudioFile == null || !pendingAudioFile.exists() || audioRecordedBytes <= 0L) {
             cancelPendingAudioUpload();
             binding.recordAudioButton.setEnabled(true);
-            binding.statusText.setText(R.string.status_audio_recording_failed);
+            binding.statusText.setText(R.string.status_audio_no_speech);
+            audioPushToTalkMode = false;
             return;
         }
         binding.recordAudioButton.setEnabled(false);
@@ -413,6 +456,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             audioCaptureCompleted = true;
             audioStreamLock.notifyAll();
         }
+        audioPushToTalkMode = false;
     }
 
     private void cancelAudioRecording() {
@@ -431,6 +475,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         cleanupPendingAudioFile();
         binding.recordAudioButton.setText(R.string.record_audio);
         binding.recordAudioButton.setEnabled(true);
+        audioPushToTalkMode = false;
     }
 
     private void releaseAudioRecorder() {
@@ -444,12 +489,31 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void startAudioCaptureThread(int bufferSize, File audioFile) {
         audioCaptureThread = new Thread(() -> {
             byte[] buffer = new byte[bufferSize];
+            byte[] preRollBuffer = new byte[bufferSize * AUDIO_VAD_PRE_ROLL_FRAMES];
+            int preRollSize = 0;
+            int speechHangoverFrames = 0;
             try (FileOutputStream outputStream = new FileOutputStream(audioFile, false)) {
                 while (!audioRecordingStopRequested && audioRecorder != null) {
                     int read = audioRecorder.read(buffer, 0, buffer.length);
                     if (read > 0) {
-                        outputStream.write(buffer, 0, read);
-                        noteAudioBytesCaptured(read);
+                        boolean speechFrame = isSpeechFrame(buffer, read);
+                        if (speechFrame) {
+                            if (!audioSpeechDetected && preRollSize > 0) {
+                                outputStream.write(preRollBuffer, 0, preRollSize);
+                                noteAudioBytesCaptured(preRollSize);
+                                preRollSize = 0;
+                            }
+                            markAudioSpeechDetected();
+                            outputStream.write(buffer, 0, read);
+                            noteAudioBytesCaptured(read);
+                            speechHangoverFrames = AUDIO_VAD_HANGOVER_FRAMES;
+                        } else if (audioSpeechDetected && speechHangoverFrames > 0) {
+                            outputStream.write(buffer, 0, read);
+                            noteAudioBytesCaptured(read);
+                            speechHangoverFrames -= 1;
+                        } else if (!audioSpeechDetected) {
+                            preRollSize = appendPreRollFrame(preRollBuffer, preRollSize, buffer, read);
+                        }
                     } else if (read < 0) {
                         throw new IOException("AudioRecord read failed with code " + read);
                     }
@@ -478,6 +542,49 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } finally {
             audioCaptureThread = null;
         }
+    }
+
+    private boolean isSpeechFrame(byte[] buffer, int read) {
+        int sampleCount = read / 2;
+        if (sampleCount <= 0) {
+            return false;
+        }
+        long sumSquares = 0L;
+        for (int index = 0; index + 1 < read; index += 2) {
+            int low = buffer[index] & 0xFF;
+            int high = buffer[index + 1];
+            short sample = (short) (low | (high << 8));
+            long value = sample;
+            sumSquares += value * value;
+        }
+        double rms = Math.sqrt(sumSquares / (double) sampleCount);
+        return rms >= AUDIO_VAD_RMS_THRESHOLD;
+    }
+
+    private int appendPreRollFrame(byte[] preRollBuffer, int currentSize, byte[] buffer, int read) {
+        if (read >= preRollBuffer.length) {
+            System.arraycopy(buffer, read - preRollBuffer.length, preRollBuffer, 0, preRollBuffer.length);
+            return preRollBuffer.length;
+        }
+        int overflow = Math.max(0, currentSize + read - preRollBuffer.length);
+        if (overflow > 0) {
+            System.arraycopy(preRollBuffer, overflow, preRollBuffer, 0, currentSize - overflow);
+            currentSize -= overflow;
+        }
+        System.arraycopy(buffer, 0, preRollBuffer, currentSize, read);
+        return currentSize + read;
+    }
+
+    private void markAudioSpeechDetected() {
+        if (audioSpeechDetected) {
+            return;
+        }
+        audioSpeechDetected = true;
+        runOnUiThread(() -> binding.statusText.setText(
+                audioPushToTalkMode
+                        ? R.string.status_audio_push_to_talk_active
+                        : R.string.status_recording_audio
+        ));
     }
 
     private void toggleLiveMode() {
@@ -954,15 +1061,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             audioCaptureCompleted = true;
             audioStreamLock.notifyAll();
         }
-        if (cleanupFile) {
-            cleanupPendingAudioFile();
-        }
+        audioRecordingStopRequested = true;
         runOnUiThread(() -> {
             binding.recordAudioButton.setEnabled(true);
             binding.recordAudioButton.setText(R.string.record_audio);
             if (audioRecordingActive) {
                 cancelAudioRecording();
+            } else if (cleanupFile) {
+                cleanupPendingAudioFile();
             }
+            audioPushToTalkMode = false;
             showError(message);
         });
     }
