@@ -35,6 +35,7 @@
     <string name="status_live_timeout_recovered">A live frame timed out. The scan recovered and will try again on the next window.</string>
     <string name="status_live_backpressure">Live scan slowed down to reduce queue pressure.</string>
     <string name="status_live_speeding_up">Live scan sped up because the recent runs are completing quickly.</string>
+    <string name="status_live_scene_stable">Scene looks stable, so the client skipped a redundant frame and slowed the capture cadence.</string>
     <string name="status_live_paused">Live scan paused.</string>
     <string name="status_live_paused_manual">Live scan paused for manual input.</string>
     <string name="status_live_permission_denied">Camera permission was denied.</string>
@@ -80,7 +81,7 @@
     <string name="voice_prompt_missing">No speech recognizer is available on this device.</string>
     <string name="voice_prompt_empty">No voice prompt was captured.</string>
     <string name="live_frame_stats">Live frames: %1$d submitted · %2$d dropped</string>
-    <string name="live_frame_stats_extended">Live frames: %1$d submitted · %2$d dropped · %3$d timed out · %4$.1fs cadence</string>
+    <string name="live_frame_stats_extended">Live frames: %1$d submitted · %2$d dropped · %3$d timed out · %4$d suppressed · %5$.1fs cadence</string>
     <string name="live_surface_description">Live camera preview</string>
     <string name="live_capture_title">Live Capture</string>
     <string name="live_capture_description">Back camera preview with periodic keyframe capture. New frames are dropped while the current run is still processing.</string>

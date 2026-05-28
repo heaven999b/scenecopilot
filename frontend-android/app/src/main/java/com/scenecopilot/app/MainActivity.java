@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
@@ -75,8 +76,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final long LIVE_CAPTURE_INTERVAL_MIN_MS = 1200L;
     private static final long LIVE_CAPTURE_INTERVAL_MAX_MS = 4200L;
     private static final long LIVE_CAPTURE_INTERVAL_STEP_MS = 300L;
+    private static final long LIVE_CAPTURE_HEARTBEAT_MS = 6500L;
     private static final long LIVE_CAPTURE_TIMEOUT_MS = 9000L;
     private static final long AUDIO_THREAD_JOIN_TIMEOUT_MS = 1500L;
+    private static final int LIVE_FRAME_HASH_GRID = 8;
+    private static final int LIVE_FRAME_HASH_DIFF_THRESHOLD = 8;
     private static final int AUDIO_UPLOAD_CHUNK_BYTES = 32 * 1024;
     private static final int AUDIO_CAPTURE_READ_BYTES = 4096;
     private static final int AUDIO_SAMPLE_RATE_HZ = 16000;
@@ -104,10 +108,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean liveCaptureInFlight;
     private int liveSubmittedFrames;
     private int liveDroppedFrames;
+    private int liveSuppressedFrames;
     private int liveTimedOutFrames;
     private long liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
     private long liveCaptureStartedAtMs;
     private long liveCaptureDeadlineAtMs;
+    private long lastLiveSubmittedAtMs;
+    private long lastSubmittedFrameHash;
+    private long pendingLiveFrameHash;
+    private boolean hasSubmittedFrameHash;
     private AudioRecord audioRecorder;
     private File pendingAudioFile;
     private boolean audioRecordingActive;
@@ -611,10 +620,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveCaptureInFlight = false;
         liveSubmittedFrames = 0;
         liveDroppedFrames = 0;
+        liveSuppressedFrames = 0;
         liveTimedOutFrames = 0;
         liveCaptureIntervalMs = LIVE_CAPTURE_INTERVAL_BASE_MS;
         liveCaptureStartedAtMs = 0L;
         liveCaptureDeadlineAtMs = 0L;
+        lastLiveSubmittedAtMs = 0L;
+        lastSubmittedFrameHash = 0L;
+        pendingLiveFrameHash = 0L;
+        hasSubmittedFrameHash = false;
         liveSessionId = currentSessionId != null && !currentSessionId.isEmpty()
                 ? currentSessionId
                 : UUID.randomUUID().toString().substring(0, 12);
@@ -630,6 +644,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         liveCaptureInFlight = false;
         liveCaptureStartedAtMs = 0L;
         liveCaptureDeadlineAtMs = 0L;
+        pendingLiveFrameHash = 0L;
         stopLiveLoop();
         if (cameraProvider != null) {
             cameraProvider.unbindAll();
@@ -721,6 +736,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                 try {
                     byte[] payload = Files.readAllBytes(outputFile.toPath());
+                    LiveFrameDecision frameDecision = decideLiveFrameUpload(payload);
+                    if (!frameDecision.shouldUpload) {
+                        liveCaptureInFlight = false;
+                        liveCaptureStartedAtMs = 0L;
+                        liveCaptureDeadlineAtMs = 0L;
+                        liveSuppressedFrames += 1;
+                        runOnUiThread(() -> {
+                            increaseLiveCadenceForStableScene();
+                            updateLiveStatsLabel();
+                            binding.statusText.setText(R.string.status_live_scene_stable);
+                        });
+                        return;
+                    }
+                    pendingLiveFrameHash = frameDecision.frameHash;
                     uploadImageBytes(
                             prompt,
                             payload,
@@ -768,6 +797,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveSubmittedFrames,
                 liveDroppedFrames,
                 liveTimedOutFrames,
+                liveSuppressedFrames,
                 liveCaptureIntervalMs / 1000.0
         ));
     }
@@ -794,6 +824,67 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (liveModeEnabled && liveCaptureIntervalMs < previous) {
             binding.statusText.setText(R.string.status_live_speeding_up);
         }
+    }
+
+    private void increaseLiveCadenceForStableScene() {
+        long previous = liveCaptureIntervalMs;
+        liveCaptureIntervalMs = Math.min(
+                LIVE_CAPTURE_INTERVAL_MAX_MS,
+                liveCaptureIntervalMs + LIVE_CAPTURE_INTERVAL_STEP_MS
+        );
+        if (liveModeEnabled && liveCaptureIntervalMs > previous) {
+            binding.statusText.setText(R.string.status_live_scene_stable);
+        }
+    }
+
+    private LiveFrameDecision decideLiveFrameUpload(byte[] payload) {
+        long frameHash = computeFrameHash(payload);
+        long nowMs = System.currentTimeMillis();
+        boolean heartbeatDue = lastLiveSubmittedAtMs <= 0L
+                || (nowMs - lastLiveSubmittedAtMs) >= LIVE_CAPTURE_HEARTBEAT_MS;
+        if (!hasSubmittedFrameHash || heartbeatDue) {
+            return new LiveFrameDecision(true, frameHash);
+        }
+        int diff = Long.bitCount(frameHash ^ lastSubmittedFrameHash);
+        boolean changedEnough = diff >= LIVE_FRAME_HASH_DIFF_THRESHOLD;
+        return new LiveFrameDecision(changedEnough, frameHash);
+    }
+
+    private long computeFrameHash(byte[] payload) {
+        Bitmap decoded = BitmapFactory.decodeByteArray(payload, 0, payload.length);
+        if (decoded == null) {
+            return System.nanoTime();
+        }
+        Bitmap scaled = Bitmap.createScaledBitmap(decoded, LIVE_FRAME_HASH_GRID, LIVE_FRAME_HASH_GRID, true);
+        if (scaled != decoded) {
+            decoded.recycle();
+        }
+        int width = scaled.getWidth();
+        int height = scaled.getHeight();
+        long sum = 0L;
+        int[] luminance = new int[width * height];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pixel = scaled.getPixel(x, y);
+                int red = (pixel >> 16) & 0xFF;
+                int green = (pixel >> 8) & 0xFF;
+                int blue = pixel & 0xFF;
+                int gray = (red * 30 + green * 59 + blue * 11) / 100;
+                int index = y * width + x;
+                luminance[index] = gray;
+                sum += gray;
+            }
+        }
+        scaled.recycle();
+        int average = (int) (sum / Math.max(1, luminance.length));
+        long hash = 0L;
+        for (int gray : luminance) {
+            hash <<= 1;
+            if (gray >= average) {
+                hash |= 1L;
+            }
+        }
+        return hash;
     }
 
     private void recoverLiveCaptureTimeout() {
@@ -1137,6 +1228,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 : UUID.randomUUID().toString().substring(0, 12);
     }
 
+    private static final class LiveFrameDecision {
+        private final boolean shouldUpload;
+        private final long frameHash;
+
+        private LiveFrameDecision(boolean shouldUpload, long frameHash) {
+            this.shouldUpload = shouldUpload;
+            this.frameHash = frameHash;
+        }
+    }
+
     private static final class AudioChunkPlan {
         private final long offset;
         private final int size;
@@ -1197,6 +1298,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 currentRunId = response.body().runId;
                 if (liveFrame) {
                     liveSessionId = response.body().sessionId;
+                    hasSubmittedFrameHash = true;
+                    lastSubmittedFrameHash = pendingLiveFrameHash;
+                    lastLiveSubmittedAtMs = System.currentTimeMillis();
+                    pendingLiveFrameHash = 0L;
                     liveSubmittedFrames += 1;
                     if (response.body().queuePosition > 0) {
                         increaseLiveCadencePressure(false);
@@ -1216,6 +1321,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveCaptureInFlight = false;
                 liveCaptureStartedAtMs = 0L;
                 liveCaptureDeadlineAtMs = 0L;
+                pendingLiveFrameHash = 0L;
                 if (liveFrame) {
                     binding.statusText.setText(R.string.status_live_error);
                     return;
