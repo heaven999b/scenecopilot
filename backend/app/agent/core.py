@@ -76,6 +76,18 @@ def _best_doc_query(user_message: str, transcript: str, ocr_text: str, scene_sum
     return query[:320]
 
 
+def _merge_transcripts(parts: list[str]) -> str:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for part in parts:
+        normalized = " ".join(part.split()).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    return "\n".join(merged)
+
+
 def _compose_final(
     *,
     transcript: str,
@@ -190,6 +202,7 @@ async def run_agent(
     *,
     prefetched_transcript: str | None = None,
     transcript_source_run_id: str | None = None,
+    prefetched_transcript_source_run_ids: list[str] | None = None,
     visible_text: str | None = None,
     run_id: str | None = None,
     trigger: str = "chat",
@@ -218,6 +231,7 @@ async def run_agent(
                 "audio_paths": audio_paths,
                 "prefetched_transcript": prefetched_transcript,
                 "transcript_source_run_id": transcript_source_run_id,
+                "prefetched_transcript_source_run_ids": prefetched_transcript_source_run_ids,
             },
             plan=plan,
         )
@@ -306,6 +320,9 @@ async def run_agent(
                 content={
                     "transcript": transcript,
                     "source_run_id": transcript_source_run_id,
+                    "source_run_ids": prefetched_transcript_source_run_ids or (
+                        [transcript_source_run_id] if transcript_source_run_id else []
+                    ),
                     "reused": True,
                 },
                 user_id=user_id,
@@ -316,6 +333,9 @@ async def run_agent(
                 event_type="transcript_reused",
                 detail={
                     "source_run_id": transcript_source_run_id,
+                    "source_run_ids": prefetched_transcript_source_run_ids or (
+                        [transcript_source_run_id] if transcript_source_run_id else []
+                    ),
                     "preview": transcript[:180],
                 },
                 user_id=user_id,
@@ -328,6 +348,9 @@ async def run_agent(
                     "preview": transcript[:180],
                     "reused": True,
                     "source_run_id": transcript_source_run_id,
+                    "source_run_ids": prefetched_transcript_source_run_ids or (
+                        [transcript_source_run_id] if transcript_source_run_id else []
+                    ),
                 },
                 user_id=user_id,
             )
@@ -342,13 +365,18 @@ async def run_agent(
                 user_id=user_id,
             )
             with Timer("asr") as timer:
-                transcript = await scene_pipeline_service.run_asr(
-                    session_id=session_id,
-                    run_id=run_id,
-                    audio_path=audio_paths[0],
-                    providers=provider_bundle.speech,
-                    user_id=user_id,
-                )
+                transcript_parts: list[str] = []
+                for audio_path in audio_paths:
+                    transcript_parts.append(
+                        await scene_pipeline_service.run_asr(
+                            session_id=session_id,
+                            run_id=run_id,
+                            audio_path=audio_path,
+                            providers=provider_bundle.speech,
+                            user_id=user_id,
+                        )
+                    )
+                transcript = _merge_transcripts(transcript_parts)
             await _emit_artifact(
                 session_id=session_id,
                 run_id=run_id,
@@ -356,6 +384,7 @@ async def run_agent(
                 payload={
                     "preview": transcript[:180],
                     "latency_ms": timer.sample().duration_ms,
+                    "audio_count": len(audio_paths),
                 },
                 user_id=user_id,
             )

@@ -7,7 +7,13 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from ..agent import core as agent_core
-from ..config import DEMO_USER_ID, UPLOADS_DIR
+from ..config import (
+    ALIGNMENT_FUTURE_TOLERANCE_MS,
+    ALIGNMENT_MAX_AUDIO_WINDOWS,
+    ALIGNMENT_WINDOW_MS,
+    DEMO_USER_ID,
+    UPLOADS_DIR,
+)
 from ..domain.runtime_models import ArtifactType, RunStatus
 from ..models import ChatResponse
 from ..orchestration.planner import build_default_plan
@@ -32,6 +38,18 @@ def _usable_transcript(text: str) -> bool:
     return True
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
 @router.post("/analyze", response_model=ChatResponse)
 async def analyze_scene(
     image: UploadFile = File(...),
@@ -52,32 +70,56 @@ async def analyze_scene(
     stored = UPLOADS_DIR / f"{uuid.uuid4().hex[:12]}{suffix}"
     await write_bytes(stored, payload)
     effective_session_id = session_id or uuid.uuid4().hex[:12]
-    aligned_audio_window = await asyncio.to_thread(
-        media_window_service.find_best_audio_window,
+    interval_start_ms = captured_at_ms - ALIGNMENT_WINDOW_MS if captured_at_ms is not None else None
+    interval_end_ms = captured_at_ms + ALIGNMENT_FUTURE_TOLERANCE_MS if captured_at_ms is not None else None
+    aligned_audio_windows = await asyncio.to_thread(
+        media_window_service.list_audio_windows_for_interval,
         effective_session_id,
-        target_at_ms=captured_at_ms,
+        interval_start_ms=interval_start_ms,
+        interval_end_ms=interval_end_ms,
+        max_gap_ms=ALIGNMENT_WINDOW_MS,
+        limit=ALIGNMENT_MAX_AUDIO_WINDOWS,
     )
     aligned_audio_paths: list[str] = []
-    prefetched_transcript = ""
-    transcript_source_run_id: str | None = None
-    if aligned_audio_window is not None:
+    aligned_audio_window_records: list[dict[str, object]] = []
+    prefetched_transcripts: list[str] = []
+    transcript_source_run_ids: list[str] = []
+    for aligned_audio_window in aligned_audio_windows:
         aligned_audio_path = Path(aligned_audio_window["audio_path"]).resolve()
-        if aligned_audio_path.exists():
-            aligned_audio_paths.append(str(aligned_audio_path))
-        else:
-            aligned_audio_window = None
-    if aligned_audio_window is not None and aligned_audio_window.get("run_id"):
-        transcript_source_run_id = str(aligned_audio_window["run_id"])
-        transcript_artifact = await asyncio.to_thread(
-            artifact_service.latest_artifact,
-            transcript_source_run_id,
-            ArtifactType.TRANSCRIPT,
-        )
-        if transcript_artifact is not None:
-            transcript_content = transcript_artifact.get("content_json") or {}
-            transcript_text = str(transcript_content.get("transcript") or "").strip()
-            if _usable_transcript(transcript_text):
-                prefetched_transcript = transcript_text
+        if not aligned_audio_path.exists():
+            continue
+        aligned_audio_paths.append(str(aligned_audio_path))
+        run_id = str(aligned_audio_window.get("run_id") or "").strip()
+        transcript_reused = False
+        transcript_artifact_id: int | None = None
+        if run_id:
+            transcript_artifact = await asyncio.to_thread(
+                artifact_service.latest_artifact,
+                run_id,
+                ArtifactType.TRANSCRIPT,
+            )
+            if transcript_artifact is not None and transcript_artifact.get("provider") != "fallback":
+                transcript_artifact_id = int(transcript_artifact["id"])
+                transcript_content = transcript_artifact.get("content_json") or {}
+                transcript_text = str(transcript_content.get("transcript") or "").strip()
+                if _usable_transcript(transcript_text):
+                    prefetched_transcripts.append(transcript_text)
+                    transcript_source_run_ids.append(run_id)
+                    transcript_reused = True
+        aligned_audio_window_records.append({
+            "audio_window_id": aligned_audio_window.get("id"),
+            "upload_id": aligned_audio_window.get("upload_id"),
+            "run_id": aligned_audio_window.get("run_id"),
+            "started_at_ms": aligned_audio_window.get("started_at_ms"),
+            "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
+            "gap_ms": aligned_audio_window.get("gap_ms"),
+            "overlap_ms": aligned_audio_window.get("overlap_ms"),
+            "alignment_mode": aligned_audio_window.get("alignment_mode"),
+            "transcript_reused": transcript_reused,
+            "transcript_artifact_id": transcript_artifact_id,
+        })
+    transcript_source_run_ids = _dedupe_preserve_order(transcript_source_run_ids)
+    prefetched_transcript = "\n".join(_dedupe_preserve_order(prefetched_transcripts))
 
     plan = build_default_plan(
         user_message=prompt,
@@ -95,38 +137,29 @@ async def analyze_scene(
             "visible_text_hint": visible_text,
             "image_path": str(stored.resolve()),
             "captured_at_ms": captured_at_ms,
-            "aligned_audio_window": {
-                "audio_window_id": aligned_audio_window.get("id"),
-                "upload_id": aligned_audio_window.get("upload_id"),
-                "run_id": aligned_audio_window.get("run_id"),
-                "started_at_ms": aligned_audio_window.get("started_at_ms"),
-                "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
-                "gap_ms": aligned_audio_window.get("gap_ms"),
-                "alignment_mode": aligned_audio_window.get("alignment_mode"),
-                "transcript_reused": bool(prefetched_transcript),
-                "transcript_source_run_id": transcript_source_run_id,
-            } if aligned_audio_window is not None else None,
+            "aligned_audio_windows": aligned_audio_window_records,
+            "alignment_window_ms": ALIGNMENT_WINDOW_MS,
+            "alignment_future_tolerance_ms": ALIGNMENT_FUTURE_TOLERANCE_MS,
+            "transcript_reused_count": len(transcript_source_run_ids),
         },
         plan=plan,
     )
-    if aligned_audio_window is not None:
+    if aligned_audio_window_records:
         await asyncio.to_thread(
             artifact_service.record_artifact,
             session_id=handle.session_id,
             run_id=handle.run_id,
             artifact_type=ArtifactType.ALIGNMENT,
             stage="planner",
-            provider="session_audio_window_alignment",
+            provider="session_audio_multimodal_window",
             content={
                 "captured_at_ms": captured_at_ms,
-                "audio_window_id": aligned_audio_window.get("id"),
-                "audio_run_id": aligned_audio_window.get("run_id"),
-                "started_at_ms": aligned_audio_window.get("started_at_ms"),
-                "ended_at_ms": aligned_audio_window.get("ended_at_ms"),
-                "gap_ms": aligned_audio_window.get("gap_ms"),
-                "alignment_mode": aligned_audio_window.get("alignment_mode"),
-                "transcript_reused": bool(prefetched_transcript),
-                "transcript_source_run_id": transcript_source_run_id,
+                "window_start_ms": interval_start_ms,
+                "window_end_ms": interval_end_ms,
+                "audio_window_count": len(aligned_audio_window_records),
+                "audio_windows": aligned_audio_window_records,
+                "transcript_reused_count": len(transcript_source_run_ids),
+                "transcript_source_run_ids": transcript_source_run_ids,
             },
             user_id=DEMO_USER_ID,
         )
@@ -134,15 +167,14 @@ async def analyze_scene(
             audit_service.record,
             session_id=handle.session_id,
             run_id=handle.run_id,
-            event_type="audio_window_aligned",
+            event_type="multimodal_window_aligned",
             detail={
                 "captured_at_ms": captured_at_ms,
-                "audio_window_id": aligned_audio_window.get("id"),
-                "audio_run_id": aligned_audio_window.get("run_id"),
-                "gap_ms": aligned_audio_window.get("gap_ms"),
-                "alignment_mode": aligned_audio_window.get("alignment_mode"),
-                "transcript_reused": bool(prefetched_transcript),
-                "transcript_source_run_id": transcript_source_run_id,
+                "window_start_ms": interval_start_ms,
+                "window_end_ms": interval_end_ms,
+                "audio_window_count": len(aligned_audio_window_records),
+                "transcript_reused_count": len(transcript_source_run_ids),
+                "transcript_source_run_ids": transcript_source_run_ids,
             },
             user_id=DEMO_USER_ID,
         )
@@ -154,7 +186,8 @@ async def analyze_scene(
                 image_paths=[str(stored.resolve())],
                 audio_paths=aligned_audio_paths,
                 prefetched_transcript=prefetched_transcript or None,
-                transcript_source_run_id=transcript_source_run_id,
+                transcript_source_run_id=transcript_source_run_ids[0] if transcript_source_run_ids else None,
+                prefetched_transcript_source_run_ids=transcript_source_run_ids or None,
                 visible_text=visible_text,
                 run_id=handle.run_id,
                 trigger="scan",

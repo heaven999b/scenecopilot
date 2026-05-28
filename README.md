@@ -128,6 +128,7 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - chunked audio upload protocol for incremental speech ingest, including PCM16 capture assembled into WAV on the backend while recording is still in progress
 - session-scoped temporal alignment between recent audio windows and captured live frames
 - transcript reuse for aligned audio windows to reduce repeated ASR latency on nearby scene runs
+- sliding multimodal audio window selection for scene runs, including multi-window transcript aggregation when needed
 - live SSE event stream
 - run detail inspection with artifacts and approvals
 - document search
