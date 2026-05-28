@@ -102,3 +102,4 @@ class SystemMetricsResponse(BaseModel):
     event_bus: dict[str, int]
     frame_stash: dict[str, int]
     watcher: dict[str, int]
+    scan_aggregator: dict[str, int]

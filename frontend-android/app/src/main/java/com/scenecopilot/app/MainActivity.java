@@ -1111,7 +1111,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     showError("Chat request failed: " + response.code());
                     return;
                 }
-                binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
+                renderAcceptedStatus(response.body(), false);
                 startEventStream(response.body().sessionId, response.body().runId);
             }
 
@@ -1150,7 +1150,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         showError("Image analyze failed: " + response.code());
                         return;
                     }
-                    binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
+                    renderAcceptedStatus(response.body(), false);
                     startEventStream(response.body().sessionId, response.body().runId);
                 }
 
@@ -1587,16 +1587,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     lastLiveSubmittedAtMs = System.currentTimeMillis();
                     pendingLiveFrameSignature = null;
                     liveSubmittedFrames += 1;
-                    if (response.body().queuePosition > 0) {
+                    if ("queued".equalsIgnoreCase(response.body().state) && response.body().queuePosition > 0) {
                         increaseLiveCadencePressure(false);
-                    } else {
+                    } else if ("queued".equalsIgnoreCase(response.body().state)) {
                         relaxLiveCadence();
                     }
                     updateLiveStatsLabel();
-                    binding.statusText.setText(getString(R.string.status_live_queued, response.body().queuePosition));
-                } else {
-                    binding.statusText.setText(getString(R.string.status_queued, response.body().queuePosition));
                 }
+                renderAcceptedStatus(response.body(), liveFrame);
                 cleanupFileQuietly(cleanupFile);
                 startEventStream(response.body().sessionId, response.body().runId);
             }
@@ -1615,6 +1613,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 showError("Camera analyze failed: " + t.getMessage());
             }
         });
+    }
+
+    private void renderAcceptedStatus(AcceptedResponse response, boolean liveFrame) {
+        String state = response.state != null ? response.state : "queued";
+        if ("aggregating".equalsIgnoreCase(state)) {
+            binding.statusText.setText(liveFrame
+                    ? R.string.status_live_aggregating
+                    : R.string.status_aggregating);
+            return;
+        }
+        if ("flushing".equalsIgnoreCase(state)) {
+            binding.statusText.setText(liveFrame
+                    ? R.string.status_live_flushing
+                    : R.string.status_flushing);
+            return;
+        }
+        binding.statusText.setText(getString(
+                liveFrame ? R.string.status_live_queued : R.string.status_queued,
+                response.queuePosition
+        ));
     }
 
     private MultipartBody.Part buildImagePart(Uri uri) throws IOException {

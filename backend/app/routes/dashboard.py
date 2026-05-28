@@ -27,6 +27,7 @@ from ..runtime import scheduler
 from ..runtime_profiles import DEFAULT_CAPTURE_PROFILE, list_runtime_profiles
 from ..services.frame_stash_service import frame_stash_service
 from ..services.session_manager import session_manager
+from ..services.window_aggregator_service import window_aggregator_service
 
 router = APIRouter(tags=["dashboard"])
 _LATEST_EVAL_PATH = DATA_DIR / "evals" / "latest_eval.json"
@@ -441,10 +442,11 @@ _DASHBOARD_HTML = """<!doctype html>
         { label: 'Event bus', value: `${summary.system_metrics.event_bus.session_subscribers} subscribers`, hint: `${summary.system_metrics.event_bus.buffered_events} buffered events` },
         { label: 'Latest frame stash', value: `${summary.system_metrics.frame_stash.pending_frames || 0} pending`, hint: `${summary.system_metrics.frame_stash.expired_frames || 0} expired frames waiting for housekeeping` },
         { label: 'Watcher debounce', value: `${summary.system_metrics.watcher.handled_entries || 0} handled keys`, hint: `TTL-backed dedupe map for paired ingest events` },
+        { label: 'Scan aggregator', value: `${summary.system_metrics.scan_aggregator.pending_windows || 0} open windows`, hint: `${summary.system_metrics.scan_aggregator.pending_frames || 0} buffered frames · ${summary.system_metrics.scan_aggregator.coalesced_frames || 0} coalesced · ${summary.system_metrics.scan_aggregator.scene_gap_flushes || 0} scene-break flushes · ${summary.system_metrics.scan_aggregator.detached_flushes || 0} detached flushes` },
         ...summary.capture_profiles.map((item) => ({
           label: `Capture mode · ${item.display_name}`,
-          value: `${item.alignment_window_ms} ms window`,
-          hint: `${item.summary} Up to ${item.alignment_max_audio_windows} aligned audio windows.`,
+          value: `${item.aggregation_delay_ms} ms buffer · ${item.alignment_window_ms} ms align`,
+          hint: `${item.summary} Up to ${item.aggregation_max_frames} frame(s), ${item.aggregation_scene_gap_ms} ms scene gap, and ${item.alignment_max_audio_windows} aligned audio windows.`,
         })),
       ], (item) => `
         <div class="item">
@@ -629,7 +631,13 @@ _DASHBOARD_HTML = """<!doctype html>
           }),
         });
       }
-      qs('launchStatus').textContent = `Queued ${captureProfile} run ${payload.run_id} at position ${payload.queue_position}`;
+      if (payload.state === 'aggregating') {
+        qs('launchStatus').textContent = `Buffering ${captureProfile} run ${payload.run_id} before queue submission`;
+      } else if (payload.state === 'flushing') {
+        qs('launchStatus').textContent = `Promoting buffered ${captureProfile} run ${payload.run_id} into the queue`;
+      } else {
+        qs('launchStatus').textContent = `Queued ${captureProfile} run ${payload.run_id} at position ${payload.queue_position}`;
+      }
       qs('sessionInput').value = payload.session_id;
       await selectRun(payload.run_id, payload.session_id);
       await refreshDashboard();
@@ -774,6 +782,7 @@ async def dashboard_summary() -> dict[str, object]:
         "event_bus": event_bus.snapshot(),
         "frame_stash": frame_stash_service.snapshot(),
         "watcher": watcher.snapshot(),
+        "scan_aggregator": window_aggregator_service.snapshot(),
     }
     return {
         "counts": counts,

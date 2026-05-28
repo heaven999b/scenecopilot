@@ -20,6 +20,8 @@
     <string name="status_label">Status</string>
     <string name="status_idle">Idle</string>
     <string name="status_uploading">Uploading request…</string>
+    <string name="status_aggregating">Buffering nearby frames before queue submission…</string>
+    <string name="status_flushing">Promoting the buffered scene window into the run queue…</string>
     <string name="status_queued">Queued at position %1$d</string>
     <string name="status_done">Done</string>
     <string name="status_approval_needed">Awaiting approval</string>
@@ -30,6 +32,8 @@
     <string name="status_live_camera_starting">Starting live camera preview…</string>
     <string name="status_live_camera_ready">Live camera ready. Waiting for the next capture window.</string>
     <string name="status_live_capturing">Capturing the next live frame…</string>
+    <string name="status_live_aggregating">Live frame accepted. Buffering the short scene window before queue submission…</string>
+    <string name="status_live_flushing">Buffered live frames are being promoted into the run queue…</string>
     <string name="status_live_queued">Live frame queued at position %1$d</string>
     <string name="status_live_running">Live scan running: %1$d submitted · %2$d dropped</string>
     <string name="status_live_timeout_recovered">A live frame timed out. The scan recovered and will try again on the next window.</string>

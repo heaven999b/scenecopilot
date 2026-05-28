@@ -43,6 +43,7 @@ class PlanStepType(StrEnum):
 
 
 class ArtifactType(StrEnum):
+    FRAME_WINDOW = "frame_window"
     OCR = "ocr_artifact"
     SCENE = "scene_observation"
     RETRIEVAL = "retrieval_hits"

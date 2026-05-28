@@ -17,6 +17,7 @@ from .ingest.watcher import start_watcher
 from .routes import audio, chat, dashboard, documents, events, frame_stash, runs, scans, state, system
 from .runtime import scheduler
 from .services.frame_stash_service import frame_stash_service
+from .services.window_aggregator_service import window_aggregator_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("scenecopilot")
@@ -29,6 +30,7 @@ async def _housekeeping_loop() -> None:
             await frame_stash_service.cleanup_expired()
             await event_bus.cleanup_stale_state()
             watcher.cleanup_handled_state()
+            await window_aggregator_service.cleanup_expired()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await frame_stash_service.reset()
+        await window_aggregator_service.reset()
         await scheduler.shutdown()
 
 

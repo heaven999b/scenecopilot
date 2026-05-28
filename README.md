@@ -20,6 +20,8 @@ It is built around three operator surfaces:
 - bounded scheduler with backpressure and run-scoped SSE streams
 - evaluation harness with latency, retrieval, OCR, and fallback metrics
 - capture profiles that switch client cadence, audio chunking, and backend alignment policy together
+- backend scan-window aggregation that coalesces nearby live frames into one run before OCR, retrieval, and decision work
+- pressure-aware aggregation policy that widens the short capture window when the run queue is busy and rolls windows on scene breaks
 
 ## Runtime Loop
 
@@ -134,6 +136,8 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - sliding multimodal audio window selection for scene runs, including multi-window transcript aggregation when needed
 - adaptive live keyframe gating on Android so stable scenes are locally suppressed, while center reading regions and lower action bands can still trigger uploads on small but important changes
 - shared `Eco / Balanced / Expert` capture profiles that retune live cadence, heartbeat windows, VAD sensitivity, and audio chunk size without changing the backend contract
+- backend scan-window aggregation that buffers nearby keyframes for a short profile-driven window, then launches one run against the retained latest frame
+- adaptive backend aggregation that can widen its buffer under queue pressure and force a rollover when a new frame lands far outside the current scene gap
 - latest-frame stash support for external wearable bridges that want to keep only one pending frame per session
 - live SSE event stream
 - run detail inspection with artifacts and approvals
@@ -147,6 +151,8 @@ the base URL in
 ## Runtime Qualities
 
 - bounded async scheduler with queue backpressure and overload rejection
+- profile-driven scan-window aggregation that reduces duplicate OCR and scene runs during short bursts of motion
+- queue-aware aggregation pressure control, so busy systems prefer one denser run over several near-duplicate scene runs
 - explicit run states from `queued` through `completed`, `failed`, or `cancelled`
 - code-level policy gates for OCR strategy, retrieval path, and approval flow
 - replaceable OCR, vision, speech, retrieval, embedding, and decision providers
@@ -154,6 +160,7 @@ the base URL in
 - SSE replay and run filtering for reconnect-safe clients, with bounded per-subscriber queues that drop oldest events under pressure
 - SQLite WAL mode, FTS-backed search, and durable run/event storage
 - latest-frame stash TTL cleanup and watcher handled-key TTL cleanup to prevent long-lived process state growth
+- buffered scan-window TTL cleanup and metrics so abandoned live windows do not accumulate in memory or on disk
 - cloud vision uploads are pre-scaled before base64 packaging so provider calls do not blindly forward full-size camera frames
 - process-time response headers and system metrics endpoints
 

@@ -7,6 +7,7 @@ from ..ingest import watcher
 from ..models import SystemMetricsResponse
 from ..runtime import scheduler
 from ..services.frame_stash_service import frame_stash_service
+from ..services.window_aggregator_service import window_aggregator_service
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -18,4 +19,5 @@ async def get_metrics() -> SystemMetricsResponse:
         event_bus=event_bus.snapshot(),
         frame_stash=frame_stash_service.snapshot(),
         watcher=watcher.snapshot(),
+        scan_aggregator=window_aggregator_service.snapshot(),
     )

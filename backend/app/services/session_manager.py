@@ -158,6 +158,47 @@ class SessionManager:
                 ),
             )
 
+    def merge_run_input(
+        self,
+        run_id: str,
+        *,
+        patch: dict[str, Any],
+        image_count: int | None = None,
+        plan: ExecutionPlan | None = None,
+    ) -> None:
+        with conn_ctx() as conn:
+            row = conn.execute(
+                "SELECT input_json FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            current_input: dict[str, Any] = {}
+            if row is not None and row["input_json"]:
+                try:
+                    current_input = json.loads(row["input_json"])
+                except json.JSONDecodeError:
+                    current_input = {}
+            current_input.update(patch)
+            plan_json = json.dumps(asdict(plan), default=str) if plan is not None else None
+            route_name = plan.route_name if plan is not None else None
+            conn.execute(
+                """
+                UPDATE runs
+                SET input_json = ?,
+                    image_count = COALESCE(?, image_count),
+                    plan_json = COALESCE(?, plan_json),
+                    route_name = COALESCE(?, route_name),
+                    updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(current_input, default=str),
+                    image_count,
+                    plan_json,
+                    route_name,
+                    run_id,
+                ),
+            )
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         conn = get_conn()
         try:
