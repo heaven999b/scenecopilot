@@ -7,10 +7,11 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
-from ..config import DEMO_USER_ID
+from ..config import DEMO_USER_ID, EVENT_SESSION_STATE_TTL_SEC
 from ..db import get_conn
 
 _SUBSCRIBERS: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+_SESSION_TOUCHED_AT: dict[str, float] = {}
 _LOCK = asyncio.Lock()
 
 
@@ -23,6 +24,7 @@ def _get_subscribers(session_id: str) -> list[asyncio.Queue[dict[str, Any]]]:
     if queues is None:
         queues = []
         _SUBSCRIBERS[session_id] = queues
+    _SESSION_TOUCHED_AT[session_id] = time.time()
     return queues
 
 
@@ -169,10 +171,27 @@ async def stream_events(
                 _SUBSCRIBERS.pop(session_id, None)
 
 
+async def cleanup_stale_state() -> int:
+    now = time.time()
+    removed = 0
+    async with _LOCK:
+        for session_id, touched_at in list(_SESSION_TOUCHED_AT.items()):
+            if (now - touched_at) < EVENT_SESSION_STATE_TTL_SEC:
+                continue
+            queues = _SUBSCRIBERS.get(session_id, [])
+            if queues:
+                continue
+            _SESSION_TOUCHED_AT.pop(session_id, None)
+            _SUBSCRIBERS.pop(session_id, None)
+            removed += 1
+    return removed
+
+
 def snapshot() -> dict[str, int]:
     subscribers = sum(len(queues) for queues in _SUBSCRIBERS.values())
     buffered_events = sum(queue.qsize() for queues in _SUBSCRIBERS.values() for queue in queues)
     return {
         "session_subscribers": subscribers,
         "buffered_events": buffered_events,
+        "tracked_sessions": len(_SESSION_TOUCHED_AT),
     }

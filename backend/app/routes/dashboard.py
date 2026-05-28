@@ -22,8 +22,10 @@ from ..config import (
     VISION_PROVIDER,
 )
 from ..db import get_conn, row_to_dict
+from ..ingest import watcher
 from ..runtime import scheduler
 from ..runtime_profiles import DEFAULT_CAPTURE_PROFILE, list_runtime_profiles
+from ..services.frame_stash_service import frame_stash_service
 from ..services.session_manager import session_manager
 
 router = APIRouter(tags=["dashboard"])
@@ -252,6 +254,9 @@ _DASHBOARD_HTML = """<!doctype html>
                   <option value="expert">Expert</option>
                 </select>
               </div>
+              <div class="row">
+                <label class="pill"><input type="checkbox" id="useLatestFrame" style="width:auto; padding:0; margin:0;" /> Use latest stashed frame for text-only launch</label>
+              </div>
             </div>
             <div>
               <div class="field">
@@ -434,6 +439,8 @@ _DASHBOARD_HTML = """<!doctype html>
         { label: 'Knowledge path', value: `${summary.provider_profile.retrieval} + ${summary.provider_profile.embedding}`, hint: `${summary.provider_profile.chunk_size} token chunks · ${summary.provider_profile.vector_dims} dims` },
         { label: 'External search', value: summary.provider_profile.external_search_enabled ? 'enabled' : 'disabled', hint: summary.provider_profile.external_search_enabled ? summary.provider_profile.external_search_provider : 'local-only retrieval' },
         { label: 'Event bus', value: `${summary.system_metrics.event_bus.session_subscribers} subscribers`, hint: `${summary.system_metrics.event_bus.buffered_events} buffered events` },
+        { label: 'Latest frame stash', value: `${summary.system_metrics.frame_stash.pending_frames || 0} pending`, hint: `${summary.system_metrics.frame_stash.expired_frames || 0} expired frames waiting for housekeeping` },
+        { label: 'Watcher debounce', value: `${summary.system_metrics.watcher.handled_entries || 0} handled keys`, hint: `TTL-backed dedupe map for paired ingest events` },
         ...summary.capture_profiles.map((item) => ({
           label: `Capture mode · ${item.display_name}`,
           value: `${item.alignment_window_ms} ms window`,
@@ -596,6 +603,7 @@ _DASHBOARD_HTML = """<!doctype html>
       const prompt = qs('promptInput').value.trim();
       const sessionId = qs('sessionInput').value.trim();
       const captureProfile = qs('captureProfileInput').value || 'balanced';
+      const useLatestFrame = qs('useLatestFrame').checked;
       const image = qs('scanImage').files[0];
       const visibleText = qs('visibleTextInput').value.trim();
       qs('launchStatus').textContent = 'Submitting run...';
@@ -614,7 +622,11 @@ _DASHBOARD_HTML = """<!doctype html>
         payload = await fetchJson('/api/chat', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ message: prompt, session_id: sessionId || null }),
+          body: JSON.stringify({
+            message: prompt,
+            session_id: sessionId || null,
+            use_latest_frame: useLatestFrame,
+          }),
         });
       }
       qs('launchStatus').textContent = `Queued ${captureProfile} run ${payload.run_id} at position ${payload.queue_position}`;
@@ -760,6 +772,8 @@ async def dashboard_summary() -> dict[str, object]:
     system_metrics = {
         "scheduler": await scheduler.snapshot(),
         "event_bus": event_bus.snapshot(),
+        "frame_stash": frame_stash_service.snapshot(),
+        "watcher": watcher.snapshot(),
     }
     return {
         "counts": counts,

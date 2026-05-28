@@ -28,7 +28,13 @@ def _usable_transcript(text: str) -> bool:
         return False
     if normalized.startswith("no speech provider configured"):
         return False
+    if normalized.startswith("audio clip received, but"):
+        return False
+    if normalized.startswith("audio clip missing or empty"):
+        return False
     if "sidecar transcript" in normalized:
+        return False
+    if "local speech transcription is unavailable" in normalized:
         return False
     return True
 

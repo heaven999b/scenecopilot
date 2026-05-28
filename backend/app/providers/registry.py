@@ -10,7 +10,6 @@ from ..config import (
     SPEECH_PROVIDER,
     VISION_PROVIDER,
 )
-from .anthropic import AnthropicDecisionProvider, AnthropicOCRProvider, AnthropicVisionProvider
 from .local import (
     LocalHashEmbeddingProvider,
     LocalDecisionProvider,
@@ -21,7 +20,6 @@ from .local import (
     NoopSpeechProvider,
     SQLiteRetrievalProvider,
 )
-from .openai_audio import OpenAITranscriptionProvider
 
 
 @dataclass(slots=True)
@@ -42,18 +40,34 @@ def _select(name: str, mapping: dict[str, object], fallback: object) -> list[obj
 
 
 def load_provider_bundle() -> ProviderBundle:
-    anthropic_ocr = AnthropicOCRProvider()
-    anthropic_vision = AnthropicVisionProvider()
-    anthropic_decision = AnthropicDecisionProvider()
     local_ocr = LocalOCRProvider()
     local_vision = LocalVisionProvider()
     sqlite_retrieval = SQLiteRetrievalProvider()
     local_decision = LocalDecisionProvider()
     local_embedding = LocalHashEmbeddingProvider()
     local_speech = LocalSpeechProvider()
-    openai_speech = OpenAITranscriptionProvider()
     noop_speech = NoopSpeechProvider()
     noop_embedding = NoopEmbeddingProvider()
+    anthropic_ocr = local_ocr
+    anthropic_vision = local_vision
+    anthropic_decision = local_decision
+    openai_speech = local_speech
+
+    try:
+        from .anthropic import AnthropicDecisionProvider, AnthropicOCRProvider, AnthropicVisionProvider
+
+        anthropic_ocr = AnthropicOCRProvider()
+        anthropic_vision = AnthropicVisionProvider()
+        anthropic_decision = AnthropicDecisionProvider()
+    except Exception:
+        pass
+
+    try:
+        from .openai_audio import OpenAITranscriptionProvider
+
+        openai_speech = OpenAITranscriptionProvider()
+    except Exception:
+        openai_speech = local_speech
 
     return ProviderBundle(
         ocr=_select(OCR_PROVIDER, {"local": local_ocr, "anthropic": anthropic_ocr}, local_ocr),

@@ -10,6 +10,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     image_paths: list[str] | None = None
     audio_paths: list[str] | None = None
+    use_latest_frame: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -99,3 +100,5 @@ class RunApprovalResponse(BaseModel):
 class SystemMetricsResponse(BaseModel):
     scheduler: dict[str, int]
     event_bus: dict[str, int]
+    frame_stash: dict[str, int]
+    watcher: dict[str, int]

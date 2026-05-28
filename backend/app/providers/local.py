@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
+from typing import Any
 
 from ..agent.tools import docs as docs_tool
+from ..config import LOCAL_SPEECH_COMPUTE_TYPE, LOCAL_SPEECH_DEVICE, LOCAL_SPEECH_MODEL
 from ..domain.runtime_models import (
     ActionRecommendation,
     FrameRef,
@@ -12,6 +16,10 @@ from ..domain.runtime_models import (
     RiskLevel,
     SceneObservation,
 )
+
+_LOCAL_ASR_MODEL: Any = None
+_LOCAL_ASR_ERROR: str | None = None
+_LOCAL_ASR_LOCK = threading.Lock()
 
 
 def _classify_risk(text: str) -> RiskLevel:
@@ -167,6 +175,30 @@ class NoopSpeechProvider:
 class LocalSpeechProvider:
     name = "local"
 
+    def _load_local_model(self):
+        global _LOCAL_ASR_MODEL, _LOCAL_ASR_ERROR
+        with _LOCAL_ASR_LOCK:
+            if _LOCAL_ASR_MODEL is not None:
+                return _LOCAL_ASR_MODEL
+            if _LOCAL_ASR_ERROR is not None:
+                raise RuntimeError(_LOCAL_ASR_ERROR)
+            try:
+                from faster_whisper import WhisperModel
+            except Exception as exc:  # pragma: no cover - optional dependency path
+                _LOCAL_ASR_ERROR = f"faster-whisper unavailable: {type(exc).__name__}: {exc}"
+                raise RuntimeError(_LOCAL_ASR_ERROR) from exc
+            _LOCAL_ASR_MODEL = WhisperModel(
+                LOCAL_SPEECH_MODEL,
+                device=LOCAL_SPEECH_DEVICE,
+                compute_type=LOCAL_SPEECH_COMPUTE_TYPE,
+            )
+            return _LOCAL_ASR_MODEL
+
+    def _transcribe_sync(self, audio_path: str) -> str:
+        model = self._load_local_model()
+        segments, _info = model.transcribe(audio_path, beam_size=1)
+        return " ".join(segment.text for segment in segments).strip()
+
     async def transcribe(self, audio_path: str) -> str:
         path = Path(audio_path)
         sidecar = path.with_suffix(".txt")
@@ -174,10 +206,18 @@ class LocalSpeechProvider:
             text = sidecar.read_text(encoding="utf-8", errors="ignore").strip()
             if text:
                 return text
-        return (
-            "Audio clip received. Configure the OpenAI speech provider for live transcription, "
-            "or provide a sidecar transcript file for deterministic local runs."
-        )
+        if not path.exists() or path.stat().st_size == 0:
+            return f"Audio clip missing or empty at {audio_path}."
+        try:
+            transcript = await asyncio.to_thread(self._transcribe_sync, audio_path)
+            if transcript:
+                return transcript
+        except Exception as exc:
+            return (
+                "Audio clip received, but local speech transcription is unavailable. "
+                f"Reason: {type(exc).__name__}: {exc}"
+            )
+        return "Audio clip received, but no speech was confidently detected."
 
 
 class LocalHashEmbeddingProvider:

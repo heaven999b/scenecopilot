@@ -3,8 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ..agent import events as event_bus
+from ..ingest import watcher
 from ..models import SystemMetricsResponse
 from ..runtime import scheduler
+from ..services.frame_stash_service import frame_stash_service
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -14,4 +16,6 @@ async def get_metrics() -> SystemMetricsResponse:
     return SystemMetricsResponse(
         scheduler=await scheduler.snapshot(),
         event_bus=event_bus.snapshot(),
+        frame_stash=frame_stash_service.snapshot(),
+        watcher=watcher.snapshot(),
     )

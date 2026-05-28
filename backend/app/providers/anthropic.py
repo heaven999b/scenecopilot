@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from ..config import (
     ANTHROPIC_API_KEY,
+    ANTHROPIC_IMAGE_JPEG_QUALITY,
+    ANTHROPIC_IMAGE_MAX_SIDE,
     ANTHROPIC_DECISION_MODEL,
     ANTHROPIC_MAX_TOKENS,
     ANTHROPIC_VISION_MODEL,
@@ -25,6 +28,11 @@ try:
     from anthropic import AsyncAnthropic
 except ImportError:  # pragma: no cover - optional runtime dependency in local env
     AsyncAnthropic = None
+
+try:  # pragma: no cover - optional runtime dependency in local env
+    from PIL import Image
+except ImportError:  # pragma: no cover - optional runtime dependency in local env
+    Image = None
 
 
 def _coerce_risk(value: str | None) -> RiskLevel:
@@ -63,12 +71,33 @@ class _AnthropicBaseProvider:
     @staticmethod
     def _image_content(frame: FrameRef) -> dict[str, Any]:
         path = Path(frame.uri)
-        encoded = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+        mime_type = frame.mime_type
+        payload = path.read_bytes()
+        if Image is not None:
+            try:
+                with Image.open(path) as image:
+                    image.load()
+                    if max(image.size) > ANTHROPIC_IMAGE_MAX_SIDE:
+                        image.thumbnail((ANTHROPIC_IMAGE_MAX_SIDE, ANTHROPIC_IMAGE_MAX_SIDE))
+                    output = BytesIO()
+                    save_format = "PNG" if mime_type == "image/png" else "JPEG"
+                    working = image
+                    if save_format == "JPEG" and image.mode not in ("RGB", "L"):
+                        working = image.convert("RGB")
+                    save_kwargs = {"format": save_format, "optimize": True}
+                    if save_format == "JPEG":
+                        save_kwargs["quality"] = ANTHROPIC_IMAGE_JPEG_QUALITY
+                    working.save(output, **save_kwargs)
+                    payload = output.getvalue()
+                    mime_type = "image/png" if save_format == "PNG" else "image/jpeg"
+            except Exception:
+                payload = path.read_bytes()
+        encoded = base64.standard_b64encode(payload).decode("utf-8")
         return {
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": frame.mime_type,
+                "media_type": mime_type,
                 "data": encoded,
             },
         }
