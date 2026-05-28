@@ -50,6 +50,7 @@ class ArtifactType(StrEnum):
     APPROVAL = "approval_record"
     TRANSCRIPT = "transcript"
     EMBEDDING = "embedding"
+    ALIGNMENT = "temporal_alignment"
 
 
 class ApprovalStatus(StrEnum):

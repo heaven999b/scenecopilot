@@ -9,10 +9,13 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from ..agent import core as agent_core
 from ..config import AUDIO_CHUNK_DIR, DEMO_USER_ID, UPLOADS_DIR
-from ..domain.runtime_models import RunStatus
+from ..domain.runtime_models import ArtifactType, RunStatus
 from ..models import AudioChunkUploadResponse, ChatResponse
 from ..orchestration.planner import build_default_plan
 from ..runtime import QueueFullError, scheduler
+from ..services.artifact_service import artifact_service
+from ..services.audit_service import audit_service
+from ..services.media_window_service import media_window_service
 from ..services.session_manager import session_manager
 from ..storage import read_bounded_bytes, write_bytes
 
@@ -110,6 +113,8 @@ async def analyze_audio(
     audio: UploadFile = File(...),
     prompt: str = Form(default="Transcribe the spoken request and tell me the safest next step."),
     session_id: str | None = Form(default=None),
+    window_started_at_ms: int | None = Form(default=None),
+    window_ended_at_ms: int | None = Form(default=None),
 ) -> ChatResponse:
     if not audio.filename:
         raise HTTPException(status_code=400, detail="Missing audio filename")
@@ -133,9 +138,55 @@ async def analyze_audio(
         image_count=0,
         input_payload={
             "audio_path": str(stored.resolve()),
+            "window_started_at_ms": window_started_at_ms,
+            "window_ended_at_ms": window_ended_at_ms,
         },
         plan=plan,
     )
+    audio_window_id: int | None = None
+    if window_started_at_ms is not None or window_ended_at_ms is not None:
+        audio_window_id = await asyncio.to_thread(
+            media_window_service.record_audio_window,
+            session_id=handle.session_id,
+            upload_id=stored.stem,
+            audio_path=str(stored.resolve()),
+            audio_format=suffix.lstrip("."),
+            prompt=prompt,
+            run_id=handle.run_id,
+            started_at_ms=window_started_at_ms,
+            ended_at_ms=window_ended_at_ms,
+            user_id=DEMO_USER_ID,
+        )
+        await asyncio.to_thread(
+            artifact_service.record_artifact,
+            session_id=handle.session_id,
+            run_id=handle.run_id,
+            artifact_type=ArtifactType.ALIGNMENT,
+            stage="ingest",
+            provider="local_audio_window_store",
+            content={
+                "audio_window_id": audio_window_id,
+                "upload_id": stored.stem,
+                "started_at_ms": window_started_at_ms,
+                "ended_at_ms": window_ended_at_ms,
+                "audio_path": str(stored.resolve()),
+                "alignment_mode": "direct_audio",
+            },
+            user_id=DEMO_USER_ID,
+        )
+        await asyncio.to_thread(
+            audit_service.record,
+            session_id=handle.session_id,
+            run_id=handle.run_id,
+            event_type="audio_window_recorded",
+            detail={
+                "audio_window_id": audio_window_id,
+                "started_at_ms": window_started_at_ms,
+                "ended_at_ms": window_ended_at_ms,
+                "audio_path": str(stored.resolve()),
+            },
+            user_id=DEMO_USER_ID,
+        )
     try:
         queue_position = await scheduler.submit(
             lambda: agent_core.run_agent(
@@ -178,6 +229,8 @@ async def upload_audio_chunk(
     final_chunk: bool = Form(default=False),
     audio_ext: str = Form(default=".m4a"),
     audio_format: str = Form(default="binary"),
+    window_started_at_ms: int | None = Form(default=None),
+    window_ended_at_ms: int | None = Form(default=None),
 ) -> AudioChunkUploadResponse:
     if chunk_index < 0:
         raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
@@ -222,8 +275,55 @@ async def upload_audio_chunk(
             "upload_id": upload_id,
             "chunk_count": chunk_index + 1,
             "audio_format": validated_format,
+            "window_started_at_ms": window_started_at_ms,
+            "window_ended_at_ms": window_ended_at_ms,
         },
         plan=plan,
+    )
+    audio_window_id = await asyncio.to_thread(
+        media_window_service.record_audio_window,
+        session_id=handle.session_id,
+        upload_id=upload_id,
+        audio_path=str(stored.resolve()),
+        audio_format=validated_format,
+        prompt=prompt,
+        run_id=handle.run_id,
+        started_at_ms=window_started_at_ms,
+        ended_at_ms=window_ended_at_ms,
+        user_id=DEMO_USER_ID,
+    )
+    await asyncio.to_thread(
+        artifact_service.record_artifact,
+        session_id=handle.session_id,
+        run_id=handle.run_id,
+        artifact_type=ArtifactType.ALIGNMENT,
+        stage="ingest",
+        provider="local_audio_window_store",
+        content={
+            "audio_window_id": audio_window_id,
+            "upload_id": upload_id,
+            "chunk_count": chunk_index + 1,
+            "started_at_ms": window_started_at_ms,
+            "ended_at_ms": window_ended_at_ms,
+            "audio_format": validated_format,
+            "audio_path": str(stored.resolve()),
+            "alignment_mode": "chunked_audio",
+        },
+        user_id=DEMO_USER_ID,
+    )
+    await asyncio.to_thread(
+        audit_service.record,
+        session_id=handle.session_id,
+        run_id=handle.run_id,
+        event_type="audio_window_recorded",
+        detail={
+            "audio_window_id": audio_window_id,
+            "upload_id": upload_id,
+            "started_at_ms": window_started_at_ms,
+            "ended_at_ms": window_ended_at_ms,
+            "audio_format": validated_format,
+        },
+        user_id=DEMO_USER_ID,
     )
     try:
         queue_position = await scheduler.submit(

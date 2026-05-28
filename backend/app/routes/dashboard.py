@@ -592,6 +592,7 @@ _DASHBOARD_HTML = """<!doctype html>
         form.append('prompt', prompt);
         if (sessionId) form.append('session_id', sessionId);
         if (visibleText) form.append('visible_text', visibleText);
+        form.append('captured_at_ms', String(Date.now()));
         payload = await fetchJson('/api/scans/analyze', { method: 'POST', body: form });
       } else {
         payload = await fetchJson('/api/chat', {

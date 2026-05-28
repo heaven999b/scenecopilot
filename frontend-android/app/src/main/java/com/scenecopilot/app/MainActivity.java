@@ -119,6 +119,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long audioRecordedBytes;
     private long audioUploadedBytes;
     private int audioNextChunkIndex;
+    private long activeAudioWindowStartedAtMs;
+    private long activeAudioWindowEndedAtMs;
     private String activeAudioUploadId;
     private String activeAudioPrompt;
     private String activeAudioSessionId;
@@ -450,6 +452,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             audioPushToTalkMode = false;
             return;
         }
+        activeAudioWindowEndedAtMs = System.currentTimeMillis();
         binding.recordAudioButton.setEnabled(false);
         binding.statusText.setText(R.string.status_audio_stream_finalizing);
         synchronized (audioStreamLock) {
@@ -842,10 +845,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         try {
             MultipartBody.Part imagePart = buildImagePart(selectedImageUri);
             RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
-            currentSessionId = UUID.randomUUID().toString().substring(0, 12);
+            currentSessionId = currentOrNewSessionId();
             RequestBody sessionBody = RequestBody.create(currentSessionId, MediaType.parse("text/plain"));
+            RequestBody capturedAtBody = RequestBody.create(
+                    String.valueOf(System.currentTimeMillis()),
+                    MediaType.parse("text/plain")
+            );
 
-            service.analyzeScene(imagePart, promptBody, sessionBody).enqueue(new Callback<AcceptedResponse>() {
+            service.analyzeScene(imagePart, promptBody, sessionBody, capturedAtBody).enqueue(new Callback<AcceptedResponse>() {
                 @Override
                 public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                     if (!response.isSuccessful() || response.body() == null) {
@@ -869,6 +876,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void initializeAudioStreaming(String prompt, String sessionId) {
         currentSessionId = sessionId;
         synchronized (audioStreamLock) {
+            activeAudioWindowStartedAtMs = System.currentTimeMillis();
+            activeAudioWindowEndedAtMs = 0L;
             activeAudioUploadId = UUID.randomUUID().toString().substring(0, 12);
             activeAudioPrompt = prompt;
             activeAudioSessionId = sessionId;
@@ -968,6 +977,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         RequestBody finalChunkBody = RequestBody.create(String.valueOf(plan.finalChunk), MediaType.parse("text/plain"));
         RequestBody audioExtBody = RequestBody.create(".wav", MediaType.parse("text/plain"));
         RequestBody audioFormatBody = RequestBody.create("pcm16le_mono_16000", MediaType.parse("text/plain"));
+        long windowEndMs = plan.finalChunk && activeAudioWindowEndedAtMs > 0L
+                ? activeAudioWindowEndedAtMs
+                : System.currentTimeMillis();
+        RequestBody windowStartedBody = RequestBody.create(
+                String.valueOf(activeAudioWindowStartedAtMs),
+                MediaType.parse("text/plain")
+        );
+        RequestBody windowEndedBody = RequestBody.create(
+                String.valueOf(windowEndMs),
+                MediaType.parse("text/plain")
+        );
 
         Response<AudioChunkUploadResponse> response = service.uploadAudioChunk(
                 audioPart,
@@ -977,7 +997,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 chunkIndexBody,
                 finalChunkBody,
                 audioExtBody,
-                audioFormatBody
+                audioFormatBody,
+                windowStartedBody,
+                windowEndedBody
         ).execute();
         if (!response.isSuccessful() || response.body() == null) {
             throw new IOException("HTTP " + response.code());
@@ -1109,6 +1131,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         pendingAudioFile = null;
     }
 
+    private String currentOrNewSessionId() {
+        return currentSessionId != null && !currentSessionId.isEmpty()
+                ? currentSessionId
+                : UUID.randomUUID().toString().substring(0, 12);
+    }
+
     private static final class AudioChunkPlan {
         private final long offset;
         private final int size;
@@ -1129,7 +1157,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 bytes,
                 fileName,
                 mimeType,
-                UUID.randomUUID().toString().substring(0, 12),
+                currentOrNewSessionId(),
                 false
         );
     }
@@ -1146,8 +1174,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         RequestBody promptBody = RequestBody.create(prompt, MediaType.parse("text/plain"));
         currentSessionId = sessionId;
         RequestBody sessionBody = RequestBody.create(sessionId, MediaType.parse("text/plain"));
+        RequestBody capturedAtBody = RequestBody.create(
+                String.valueOf(System.currentTimeMillis()),
+                MediaType.parse("text/plain")
+        );
 
-        service.analyzeScene(imagePart, promptBody, sessionBody).enqueue(new Callback<AcceptedResponse>() {
+        service.analyzeScene(imagePart, promptBody, sessionBody, capturedAtBody).enqueue(new Callback<AcceptedResponse>() {
             @Override
             public void onResponse(@NonNull Call<AcceptedResponse> call, @NonNull Response<AcceptedResponse> response) {
                 if (!response.isSuccessful() || response.body() == null) {

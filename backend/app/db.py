@@ -121,6 +121,21 @@ CREATE TABLE IF NOT EXISTS reasoning_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS audio_windows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  run_id TEXT REFERENCES runs(id),
+  upload_id TEXT NOT NULL,
+  prompt TEXT,
+  audio_path TEXT NOT NULL,
+  audio_format TEXT NOT NULL DEFAULT 'binary',
+  started_at_ms INTEGER,
+  ended_at_ms INTEGER,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS run_artifacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -178,6 +193,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session
   ON chat_messages(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_reasoning_events_session
   ON reasoning_events(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_audio_windows_session_time
+  ON audio_windows(session_id, ended_at_ms DESC, started_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_audio_windows_run
+  ON audio_windows(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_run_artifacts_run
   ON run_artifacts(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_approval_records_run

@@ -28,7 +28,8 @@ public interface SceneCopilotService {
     Call<AcceptedResponse> analyzeScene(
             @Part MultipartBody.Part image,
             @Part("prompt") RequestBody prompt,
-            @Part("session_id") RequestBody sessionId
+            @Part("session_id") RequestBody sessionId,
+            @Part("captured_at_ms") RequestBody capturedAtMs
     );
 
     @Multipart
@@ -49,7 +50,9 @@ public interface SceneCopilotService {
             @Part("chunk_index") RequestBody chunkIndex,
             @Part("final_chunk") RequestBody finalChunk,
             @Part("audio_ext") RequestBody audioExt,
-            @Part("audio_format") RequestBody audioFormat
+            @Part("audio_format") RequestBody audioFormat,
+            @Part("window_started_at_ms") RequestBody windowStartedAtMs,
+            @Part("window_ended_at_ms") RequestBody windowEndedAtMs
     );
 
     @GET("api/documents/search")
