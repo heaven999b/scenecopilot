@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from ..config import DEMO_USER_ID
-from ..domain.runtime_models import ActionRecommendation, ArtifactType, RetrievalHit, RiskLevel
+from ..domain.runtime_models import ActionRecommendation, ArtifactType, RetrievalHit, RiskLevel, SceneStructure
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 
@@ -16,6 +18,8 @@ class DecisionService:
         scene_summary: str,
         ocr_text: str,
         retrieved_docs: list[RetrievalHit],
+        scene_structure: SceneStructure | None = None,
+        memory_context: str = "",
         providers: list[object],
         user_id: int = DEMO_USER_ID,
     ) -> ActionRecommendation:
@@ -27,6 +31,8 @@ class DecisionService:
                     scene_summary=scene_summary,
                     ocr_text=ocr_text,
                     retrieved_docs=retrieved_docs,
+                    scene_structure=scene_structure,
+                    memory_context=memory_context,
                 )
                 artifact_service.record_artifact(
                     session_id=session_id,
@@ -41,6 +47,16 @@ class DecisionService:
                         "next_steps": result.next_steps,
                         "confidence": result.confidence,
                         "priority": result.priority,
+                        "intervention_type": result.intervention_type.value,
+                        "uncertainty_level": result.uncertainty_level,
+                        "clarification_question": result.clarification_question,
+                        "supporting_doc_titles": result.supporting_doc_titles,
+                        "choice_card": {
+                            "card_type": result.choice_card.card_type,
+                            "headline": result.choice_card.headline,
+                            "rationale": result.choice_card.rationale,
+                            "options": [asdict(option) for option in result.choice_card.options],
+                        } if result.choice_card is not None else None,
                     },
                     user_id=user_id,
                 )
@@ -82,6 +98,11 @@ class DecisionService:
                 "next_steps": fallback.next_steps,
                 "confidence": fallback.confidence,
                 "priority": fallback.priority,
+                "intervention_type": fallback.intervention_type.value,
+                "uncertainty_level": fallback.uncertainty_level,
+                "clarification_question": fallback.clarification_question,
+                "supporting_doc_titles": fallback.supporting_doc_titles,
+                "choice_card": None,
             },
             user_id=user_id,
         )

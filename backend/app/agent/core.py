@@ -9,17 +9,30 @@ from typing import Any
 
 from ..config import DEMO_USER_ID
 from ..db import conn_ctx, get_conn
-from ..domain.runtime_models import ActionRecommendation, ArtifactType, FrameRef, RetrievalHit, RiskLevel, RunStatus
+from ..domain.runtime_models import (
+    ActionRecommendation,
+    ArtifactType,
+    FrameRef,
+    InterventionType,
+    RetrievalHit,
+    RiskLevel,
+    RunStatus,
+    SceneObservation,
+)
 from ..observability.metrics import Timer
 from ..orchestration.planner import build_default_plan
 from ..orchestration.policies import (
     choose_latency_tier,
+    choose_intervention_policy,
     choose_ocr_policy,
     choose_retrieval_policy,
+    classify_risk_taxonomy,
+    evaluate_clarification_policy,
 )
 from ..providers.registry import provider_bundle
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
+from ..services.choice_manager_service import choice_manager_service
 from ..services.pipeline_service import scene_pipeline_service
 from ..services.scene_memory_service import scene_memory_service
 from ..services.session_manager import session_manager
@@ -88,6 +101,27 @@ def _merge_transcripts(parts: list[str]) -> str:
     return "\n".join(merged)
 
 
+def _merge_uncertainty_levels(first: str, second: str) -> str:
+    order = {"low": 0, "medium": 1, "high": 2}
+    first_score = order.get(first, 0)
+    second_score = order.get(second, 0)
+    return first if first_score >= second_score else second
+
+
+def _option_labels(decision: ActionRecommendation) -> str:
+    if not decision.choice_card or not decision.choice_card.options:
+        return ""
+    return ", ".join(option.label for option in decision.choice_card.options[:4])
+
+
+def _default_scene_observation(summary: str) -> SceneObservation:
+    return SceneObservation(
+        summary=summary,
+        risk_level=RiskLevel.LOW,
+        provider="runtime_default",
+    )
+
+
 def _compose_final(
     *,
     transcript: str,
@@ -97,9 +131,13 @@ def _compose_final(
     decision: ActionRecommendation,
 ) -> str:
     parts = [decision.recommendation.strip()]
+    if decision.intervention_type == InterventionType.ASK_CLARIFICATION and decision.clarification_question:
+        parts = [decision.clarification_question.strip()]
     recommendation_lower = decision.recommendation.lower()
     if decision.approval_required and "approval is required" not in recommendation_lower and "review is required" not in recommendation_lower:
         parts.append("Human review is required before proceeding.")
+    if not decision.evidence_supported:
+        parts.append("The current guidance is based on incomplete evidence, so a clearer view or manual lookup is recommended.")
     if transcript:
         parts.append(f"Audio context: {transcript[:180].strip()}")
     if ocr_text:
@@ -111,6 +149,9 @@ def _compose_final(
     if decision.next_steps:
         steps = " ".join(f"{idx + 1}. {step}" for idx, step in enumerate(decision.next_steps))
         parts.append(f"Next steps: {steps}")
+    option_labels = _option_labels(decision)
+    if option_labels:
+        parts.append(f"Options: {option_labels}")
     return " ".join(part for part in parts if part)
 
 
@@ -245,7 +286,9 @@ async def run_agent(
     ocr_text = ""
     scene_summary = "No scene image was provided, so the answer is based on the user request and matching documents only."
     scene_risk = RiskLevel.LOW
+    scene_result = _default_scene_observation(scene_summary)
     document_hits: list[dict[str, Any]] = []
+    memory_context_text = ""
 
     try:
         await asyncio.to_thread(
@@ -266,6 +309,7 @@ async def run_agent(
             user_id=user_id,
         )
         context = await asyncio.to_thread(_load_recent_context, session_id, user_id)
+        memory_context_text = await asyncio.to_thread(scene_memory_service.summarize_session_memory, session_id)
         latency_tier = choose_latency_tier(user_message, has_image=bool(image_paths))
         await event_bus.emit_event(
             session_id,
@@ -283,6 +327,7 @@ async def run_agent(
                 ],
                 "context_turns": len(context),
                 "latency_tier": latency_tier,
+                "memory_context_available": bool(memory_context_text),
             },
             run_id=run_id,
             user_id=user_id,
@@ -296,6 +341,7 @@ async def run_agent(
                 "modalities": [item.value for item in plan.modalities],
                 "latency_tier": latency_tier,
                 "context_turns": len(context),
+                "memory_context_available": bool(memory_context_text),
             },
             user_id=user_id,
         )
@@ -507,6 +553,9 @@ async def run_agent(
                     "summary": scene_summary,
                     "risk_level": scene_risk.value,
                     "tags": scene_result.tags,
+                    "uncertainty_level": scene_result.uncertainty_level,
+                    "layout_summary": scene_result.structure.layout_summary,
+                    "hazard_cues": [item.label for item in scene_result.structure.hazard_cues[:4]],
                     "latency_ms": timer.sample().duration_ms,
                 },
                 user_id=user_id,
@@ -619,6 +668,8 @@ async def run_agent(
                 prompt=combined_prompt,
                 scene_summary=scene_summary,
                 ocr_text=ocr_text,
+                scene_structure=scene_result.structure,
+                memory_context=memory_context_text,
                 retrieved_docs=[
                     RetrievalHit(
                         document_id=item["id"],
@@ -632,6 +683,93 @@ async def run_agent(
                 providers=provider_bundle.decision,
                 user_id=user_id,
             )
+        recommendation.uncertainty_level = _merge_uncertainty_levels(
+            recommendation.uncertainty_level,
+            scene_result.uncertainty_level,
+        )
+        if not recommendation.supporting_doc_titles:
+            recommendation.supporting_doc_titles = [item["title"] for item in document_hits[:3]]
+        clarification = evaluate_clarification_policy(
+            user_message=user_message,
+            ocr_text=ocr_text,
+            scene_observation=scene_result,
+            retrieved_document_count=len(document_hits),
+        )
+        risk_taxonomy = classify_risk_taxonomy(
+            user_message=user_message,
+            scene_observation=scene_result,
+            recommendation=recommendation,
+            retrieved_document_count=len(document_hits),
+        )
+        intervention = choose_intervention_policy(
+            recommendation=recommendation,
+            clarification=clarification,
+            risk_taxonomy=risk_taxonomy,
+        )
+        recommendation.intervention_type = intervention.intervention_type
+        recommendation.risk_level = risk_taxonomy.risk_level
+        if clarification.required:
+            recommendation.title = "Need a clearer view before proceeding"
+            recommendation.clarification_question = clarification.question
+            recommendation.recommendation = clarification.question or recommendation.recommendation
+            recommendation.next_steps = [
+                "Capture a closer or sharper frame of the key control or label.",
+                "Open the relevant SOP or manual for confirmation.",
+                "Delay the action until the missing evidence is available.",
+            ]
+            recommendation.evidence_supported = False
+            recommendation.priority = "high" if risk_taxonomy.risk_level != RiskLevel.LOW else recommendation.priority
+        else:
+            recommendation.evidence_supported = recommendation.evidence_supported and (
+                bool(document_hits) or not refined_retrieval_policy.required
+            )
+        choice_card = choice_manager_service.build_choice_card(
+            recommendation=recommendation,
+            intervention=intervention,
+            clarification=clarification,
+            risk_taxonomy=risk_taxonomy,
+            retrieved_docs=[
+                RetrievalHit(
+                    document_id=item["id"],
+                    title=item["title"],
+                    snippet=item["snippet"],
+                    score=float(item["score"]),
+                    source=item["source"],
+                )
+                for item in document_hits
+            ],
+        )
+        recommendation.choice_card = choice_card
+        await event_bus.emit_event(
+            session_id,
+            "policy",
+            {
+                "clarification_required": clarification.required,
+                "clarification_reason": clarification.reason,
+                "clarification_question": clarification.question,
+                "risk_bucket": risk_taxonomy.risk_bucket,
+                "risk_reason": risk_taxonomy.reason,
+                "intervention_type": recommendation.intervention_type.value,
+                "choice_card_type": choice_card.card_type if choice_card is not None else None,
+            },
+            run_id=run_id,
+            user_id=user_id,
+        )
+        await _record_audit(
+            session_id=session_id,
+            run_id=run_id,
+            event_type="scene_policies_evaluated",
+            detail={
+                "clarification_required": clarification.required,
+                "clarification_reason": clarification.reason,
+                "risk_bucket": risk_taxonomy.risk_bucket,
+                "risk_reason": risk_taxonomy.reason,
+                "approval_mode": risk_taxonomy.approval_mode,
+                "intervention_type": recommendation.intervention_type.value,
+                "memory_context_available": bool(memory_context_text),
+            },
+            user_id=user_id,
+        )
         await _emit_artifact(
             session_id=session_id,
             run_id=run_id,
@@ -640,7 +778,11 @@ async def run_agent(
                 "title": recommendation.title,
                 "risk_level": recommendation.risk_level.value,
                 "priority": recommendation.priority,
+                "intervention_type": recommendation.intervention_type.value,
+                "uncertainty_level": recommendation.uncertainty_level,
                 "approval_required": recommendation.approval_required,
+                "choice_card_type": choice_card.card_type if choice_card is not None else None,
+                "evidence_supported": recommendation.evidence_supported,
                 "latency_ms": timer.sample().duration_ms,
             },
             user_id=user_id,
@@ -659,6 +801,21 @@ async def run_agent(
             session_id=session_id,
             run_id=run_id,
             recommendation=recommendation,
+            scene_observation=scene_result,
+            clarification=clarification,
+            risk_taxonomy=risk_taxonomy,
+            choice_card=choice_card,
+            ocr_text=ocr_text,
+            retrieved_docs=[
+                RetrievalHit(
+                    document_id=item["id"],
+                    title=item["title"],
+                    snippet=item["snippet"],
+                    score=float(item["score"]),
+                    source=item["source"],
+                )
+                for item in document_hits
+            ],
             retrieved_document_count=len(document_hits),
             user_id=user_id,
         )
@@ -669,6 +826,7 @@ async def run_agent(
                 "status": approval.status.value,
                 "risk_level": approval.risk_level.value,
                 "reason": approval.reason,
+                "risk_bucket": risk_taxonomy.risk_bucket,
                 "blocked": recommendation.blocked,
             },
             run_id=run_id,
@@ -690,8 +848,9 @@ async def run_agent(
             prompt=user_message,
             image_path=image_paths[0] if image_paths else None,
             ocr_text=ocr_text,
-            scene_summary=scene_summary,
+            scene_observation=scene_result,
             decision=recommendation,
+            choice_card=choice_card,
             user_id=user_id,
         )
 
@@ -713,7 +872,9 @@ async def run_agent(
                 {"service": "speech", "used": bool(audio_paths)},
                 {"service": "ocr", "used": bool(image_paths)},
                 {"service": "retrieval", "document_count": len(document_hits)},
+                {"service": "choice_manager", "card_type": choice_card.card_type if choice_card is not None else None},
                 {"service": "approval", "status": approval.status.value},
+                {"service": "memory_context", "available": bool(memory_context_text)},
                 {"service": "scene_memory", **memory_result},
             ],
         )
@@ -743,6 +904,7 @@ async def run_agent(
                 "artifact_count": artifact_count,
                 "approval_status": approval.status.value,
                 "blocked": recommendation.blocked,
+                "intervention_type": recommendation.intervention_type.value,
             },
             run_id=run_id,
             user_id=user_id,
@@ -761,6 +923,10 @@ async def run_agent(
                 "priority": recommendation.priority,
                 "blocked": recommendation.blocked,
                 "approval_required": recommendation.approval_required,
+                "intervention_type": recommendation.intervention_type.value,
+                "uncertainty_level": recommendation.uncertainty_level,
+                "clarification_question": recommendation.clarification_question,
+                "supporting_doc_titles": recommendation.supporting_doc_titles,
             },
         }
     except Exception as exc:

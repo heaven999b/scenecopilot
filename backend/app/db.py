@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS scene_captures (
   scene_summary TEXT,
   risk_level TEXT NOT NULL DEFAULT 'low',
   decisions_json TEXT NOT NULL DEFAULT '[]',
+  context_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -95,6 +96,9 @@ CREATE TABLE IF NOT EXISTS action_cards (
   run_id TEXT REFERENCES runs(id),
   title TEXT NOT NULL,
   detail TEXT NOT NULL,
+  card_type TEXT NOT NULL DEFAULT 'recommendation',
+  options_json TEXT NOT NULL DEFAULT '[]',
+  context_json TEXT NOT NULL DEFAULT '{}',
   priority TEXT NOT NULL DEFAULT 'medium',
   status TEXT NOT NULL DEFAULT 'open',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -159,6 +163,7 @@ CREATE TABLE IF NOT EXISTS approval_records (
   policy_name TEXT NOT NULL,
   reason TEXT NOT NULL,
   recommended_action TEXT NOT NULL,
+  packet_json TEXT NOT NULL DEFAULT '{}',
   reviewer_note TEXT,
   resolved_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -262,7 +267,12 @@ MIGRATIONS = (
     "ALTER TABLE chat_messages ADD COLUMN run_id TEXT REFERENCES runs(id)",
     "ALTER TABLE reasoning_events ADD COLUMN run_id TEXT REFERENCES runs(id)",
     "ALTER TABLE approval_records ADD COLUMN reviewer_note TEXT",
+    "ALTER TABLE approval_records ADD COLUMN packet_json TEXT NOT NULL DEFAULT '{}'",
     "ALTER TABLE audio_windows ADD COLUMN capture_profile TEXT NOT NULL DEFAULT 'balanced'",
+    "ALTER TABLE scene_captures ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE action_cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'recommendation'",
+    "ALTER TABLE action_cards ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE action_cards ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
 )
 
 POST_MIGRATION_INDEXES = (
@@ -329,6 +339,9 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "detail_json",
         "input_json",
         "plan_json",
+        "context_json",
+        "options_json",
+        "packet_json",
     ):
         if key in data and isinstance(data[key], str):
             try:

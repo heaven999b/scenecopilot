@@ -4,10 +4,12 @@ from typing import Protocol
 
 from ..domain.runtime_models import (
     ActionRecommendation,
+    ChoiceCard,
     FrameRef,
     OCRResult,
     RetrievalHit,
     RiskLevel,
+    SceneStructure,
     SceneObservation,
 )
 
@@ -35,6 +37,8 @@ class DecisionProvider(Protocol):
         scene_summary: str,
         ocr_text: str,
         retrieved_docs: list[RetrievalHit],
+        scene_structure: SceneStructure | None = None,
+        memory_context: str = "",
     ) -> ActionRecommendation:
         ...
 

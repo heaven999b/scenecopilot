@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from typing import Any
 
@@ -21,8 +22,8 @@ class ApprovalService:
             cur = conn.execute(
                 """
                 INSERT INTO approval_records
-                  (user_id, session_id, run_id, status, risk_level, policy_name, reason, recommended_action)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (user_id, session_id, run_id, status, risk_level, policy_name, reason, recommended_action, packet_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -33,6 +34,7 @@ class ApprovalService:
                     approval.policy_name,
                     approval.reason,
                     approval.recommended_action,
+                    json.dumps(approval.packet, default=str),
                 ),
             )
             return int(cur.lastrowid)
@@ -42,7 +44,7 @@ class ApprovalService:
         try:
             rows = conn.execute(
                 """
-                SELECT id, status, risk_level, policy_name, reason, recommended_action, reviewer_note, resolved_at, created_at
+                SELECT id, status, risk_level, policy_name, reason, recommended_action, packet_json, reviewer_note, resolved_at, created_at
                 FROM approval_records
                 WHERE run_id = ?
                 ORDER BY id
@@ -64,7 +66,7 @@ class ApprovalService:
         with conn_ctx() as conn:
             latest = conn.execute(
                 """
-                SELECT id, session_id, status, risk_level, policy_name, reason, recommended_action, reviewer_note, resolved_at, created_at
+                SELECT id, session_id, status, risk_level, policy_name, reason, recommended_action, packet_json, reviewer_note, resolved_at, created_at
                 FROM approval_records
                 WHERE run_id = ?
                 ORDER BY id DESC
@@ -84,7 +86,7 @@ class ApprovalService:
             )
             row = conn.execute(
                 """
-                SELECT id, session_id, status, risk_level, policy_name, reason, recommended_action, reviewer_note, resolved_at, created_at
+                SELECT id, session_id, status, risk_level, policy_name, reason, recommended_action, packet_json, reviewer_note, resolved_at, created_at
                 FROM approval_records
                 WHERE id = ?
                 """,

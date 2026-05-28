@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 
 class Modality(StrEnum):
@@ -30,6 +31,22 @@ class RiskLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class InterventionType(StrEnum):
+    WAIT = "wait"
+    ANSWER = "answer"
+    ASK_CLARIFICATION = "ask_clarification"
+    RECOMMEND_ACTION = "recommend_action"
+    REQUIRE_APPROVAL = "require_approval"
+    LIGHTWEIGHT_OFFER = "lightweight_offer"
+
+
+class MemoryScope(StrEnum):
+    RUN = "run"
+    SESSION = "session"
+    SCENE_CHANGE = "scene_change"
+    USER_CHOICE = "user_choice"
 
 
 class PlanStepType(StrEnum):
@@ -84,11 +101,42 @@ class OCRResult:
 
 
 @dataclass(slots=True)
+class SceneElement:
+    element_id: str
+    kind: str
+    label: str
+    salience: str = "medium"
+    role: str = "context"
+    evidence: str | None = None
+
+
+@dataclass(slots=True)
+class EvidenceGap:
+    gap_type: str
+    reason: str
+    suggested_follow_up: str
+
+
+@dataclass(slots=True)
+class SceneStructure:
+    layout_summary: str = ""
+    primary_entry_points: list[SceneElement] = field(default_factory=list)
+    text_regions: list[SceneElement] = field(default_factory=list)
+    action_controls: list[SceneElement] = field(default_factory=list)
+    hazard_cues: list[SceneElement] = field(default_factory=list)
+    overlays: list[SceneElement] = field(default_factory=list)
+    salient_elements: list[SceneElement] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class SceneObservation:
     summary: str
     risk_level: RiskLevel
     tags: list[str] = field(default_factory=list)
     provider: str = "unknown"
+    structure: SceneStructure = field(default_factory=SceneStructure)
+    uncertainty_level: str = "low"
+    evidence_gaps: list[EvidenceGap] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -101,6 +149,25 @@ class RetrievalHit:
 
 
 @dataclass(slots=True)
+class ChoiceOption:
+    option_id: str
+    label: str
+    description: str
+    requires_confirmation: bool = False
+
+
+@dataclass(slots=True)
+class ChoiceCard:
+    card_type: str
+    headline: str
+    rationale: str
+    options: list[ChoiceOption] = field(default_factory=list)
+    evidence_hint: str | None = None
+    cancellable: bool = True
+    deferrable: bool = True
+
+
+@dataclass(slots=True)
 class ActionRecommendation:
     title: str
     recommendation: str
@@ -110,6 +177,20 @@ class ActionRecommendation:
     priority: str = "medium"
     blocked: bool = False
     approval_required: bool = False
+    intervention_type: InterventionType = InterventionType.RECOMMEND_ACTION
+    uncertainty_level: str = "low"
+    clarification_question: str | None = None
+    evidence_supported: bool = True
+    supporting_doc_titles: list[str] = field(default_factory=list)
+    choice_card: ChoiceCard | None = None
+
+
+@dataclass(slots=True)
+class MemoryLayers:
+    run_memory: dict[str, Any] = field(default_factory=dict)
+    session_memory: dict[str, Any] = field(default_factory=dict)
+    scene_change_memory: dict[str, Any] = field(default_factory=dict)
+    user_choice_memory: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -127,6 +208,7 @@ class ApprovalRecord:
     policy_name: str
     reason: str
     recommended_action: str
+    packet: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

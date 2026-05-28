@@ -16,11 +16,15 @@ from ..config import (
 )
 from ..domain.runtime_models import (
     ActionRecommendation,
+    EvidenceGap,
     FrameRef,
+    InterventionType,
     OCRBlock,
     OCRResult,
     RetrievalHit,
     RiskLevel,
+    SceneElement,
+    SceneStructure,
     SceneObservation,
 )
 
@@ -163,15 +167,57 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
             prompt=(
                 "Analyze this first-person scene for a wearable AI assistant. "
                 "Consider the user prompt and OCR text. "
-                'Return strict JSON with keys {"summary": string, "risk_level": "low"|"medium"|"high", "tags": string[]}. '
+                'Return strict JSON with keys {"summary": string, "risk_level": "low"|"medium"|"high", '
+                '"tags": string[], "uncertainty_level": "low"|"medium"|"high", '
+                '"layout_summary": string, "primary_entry_points": string[], "hazard_cues": string[], '
+                '"evidence_gaps": [{"gap_type": string, "reason": string, "suggested_follow_up": string}]}. '
                 f"User prompt: {prompt}\nOCR text: {ocr_text}"
             ),
         )
+        primary_entry_points = [
+            SceneElement(
+                element_id=f"entry:{idx}",
+                kind="primary_entry",
+                label=str(item).strip(),
+                salience="high",
+                role="entry_point",
+            )
+            for idx, item in enumerate(payload.get("primary_entry_points", []))
+            if str(item).strip()
+        ][:4]
+        hazard_cues = [
+            SceneElement(
+                element_id=f"hazard:{idx}",
+                kind="hazard_cue",
+                label=str(item).strip(),
+                salience="high",
+                role="risk_signal",
+            )
+            for idx, item in enumerate(payload.get("hazard_cues", []))
+            if str(item).strip()
+        ][:4]
+        evidence_gaps = [
+            EvidenceGap(
+                gap_type=str(item.get("gap_type") or "unknown"),
+                reason=str(item.get("reason") or "").strip() or "The provider reported missing evidence.",
+                suggested_follow_up=str(item.get("suggested_follow_up") or "").strip() or "Capture a clearer view before deciding.",
+            )
+            for item in payload.get("evidence_gaps", [])
+            if isinstance(item, dict)
+        ][:4]
         return SceneObservation(
             summary=str(payload.get("summary", "")).strip() or "No scene summary returned.",
             risk_level=_coerce_risk(str(payload.get("risk_level", "low"))),
             tags=[str(item) for item in payload.get("tags", []) if str(item).strip()][:8],
             provider=self.name,
+            structure=SceneStructure(
+                layout_summary=str(payload.get("layout_summary", "")).strip(),
+                primary_entry_points=primary_entry_points,
+                hazard_cues=hazard_cues,
+                salient_elements=primary_entry_points[:1] or hazard_cues[:1],
+            ),
+            uncertainty_level=str(payload.get("uncertainty_level", "medium")).strip().lower() or "medium",
+            evidence_gaps=evidence_gaps,
         )
 
 
@@ -186,6 +232,8 @@ class AnthropicDecisionProvider(_AnthropicBaseProvider):
         scene_summary: str,
         ocr_text: str,
         retrieved_docs: list[RetrievalHit],
+        scene_structure: SceneStructure | None = None,
+        memory_context: str = "",
     ) -> ActionRecommendation:
         docs = [
             {
@@ -200,13 +248,21 @@ class AnthropicDecisionProvider(_AnthropicBaseProvider):
                 "You are the decision layer for a wearable scene assistant. "
                 "Return strict JSON with keys "
                 '{"title": string, "recommendation": string, "risk_level": "low"|"medium"|"high", '
-                '"next_steps": string[], "confidence": number, "priority": "low"|"medium"|"high"}. '
+                '"next_steps": string[], "confidence": number, "priority": "low"|"medium"|"high", '
+                '"intervention_type": "wait"|"answer"|"ask_clarification"|"recommend_action"|"require_approval"|"lightweight_offer"}. '
                 f"User prompt: {prompt}\n"
                 f"Scene summary: {scene_summary}\n"
                 f"OCR text: {ocr_text}\n"
+                f"Scene structure: {json.dumps({'layout_summary': (scene_structure.layout_summary if scene_structure else ''), 'primary_entry_points': [item.label for item in (scene_structure.primary_entry_points if scene_structure else [])], 'hazard_cues': [item.label for item in (scene_structure.hazard_cues if scene_structure else [])]}, ensure_ascii=True)}\n"
+                f"Recent memory: {memory_context}\n"
                 f"Retrieved docs: {json.dumps(docs, ensure_ascii=True)}"
             ),
         )
+        intervention_raw = str(payload.get("intervention_type", InterventionType.RECOMMEND_ACTION.value)).strip().lower()
+        try:
+            intervention_type = InterventionType(intervention_raw)
+        except ValueError:
+            intervention_type = InterventionType.RECOMMEND_ACTION
         return ActionRecommendation(
             title=str(payload.get("title", "")).strip() or "SceneCopilot recommendation",
             recommendation=str(payload.get("recommendation", "")).strip() or "No recommendation returned.",
@@ -214,4 +270,6 @@ class AnthropicDecisionProvider(_AnthropicBaseProvider):
             next_steps=[str(item) for item in payload.get("next_steps", []) if str(item).strip()][:6],
             confidence=float(payload.get("confidence", 0.0) or 0.0),
             priority=str(payload.get("priority", "medium")).strip().lower() or "medium",
+            intervention_type=intervention_type,
+            supporting_doc_titles=[item["title"] for item in docs[:4]],
         )
