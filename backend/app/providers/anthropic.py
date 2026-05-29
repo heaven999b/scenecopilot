@@ -60,6 +60,49 @@ def _extract_text_blocks(payload: str) -> list[OCRBlock]:
     return blocks
 
 
+def _coerce_element(
+    item: Any,
+    *,
+    element_id: str,
+    kind: str,
+    role: str,
+    salience: str = "high",
+    fallback_bbox: tuple[float, float, float, float] | None = None,
+) -> SceneElement | None:
+    if isinstance(item, dict):
+        label = str(item.get("label") or item.get("text") or "").strip()
+        if not label:
+            return None
+        bbox = fallback_bbox or (None, None, None, None)
+        return SceneElement(
+            element_id=element_id,
+            kind=kind,
+            label=label,
+            salience=str(item.get("salience") or salience),
+            role=role,
+            evidence=str(item.get("evidence") or "").strip() or None,
+            bbox_x=float(item["bbox_x"]) if item.get("bbox_x") is not None else bbox[0],
+            bbox_y=float(item["bbox_y"]) if item.get("bbox_y") is not None else bbox[1],
+            bbox_w=float(item["bbox_w"]) if item.get("bbox_w") is not None else bbox[2],
+            bbox_h=float(item["bbox_h"]) if item.get("bbox_h") is not None else bbox[3],
+        )
+    label = str(item).strip()
+    if not label:
+        return None
+    bbox = fallback_bbox or (None, None, None, None)
+    return SceneElement(
+        element_id=element_id,
+        kind=kind,
+        label=label,
+        salience=salience,
+        role=role,
+        bbox_x=bbox[0],
+        bbox_y=bbox[1],
+        bbox_w=bbox[2],
+        bbox_h=bbox[3],
+    )
+
+
 class _AnthropicBaseProvider:
     name = "anthropic"
 
@@ -169,32 +212,34 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
                 "Consider the user prompt and OCR text. "
                 'Return strict JSON with keys {"summary": string, "risk_level": "low"|"medium"|"high", '
                 '"tags": string[], "uncertainty_level": "low"|"medium"|"high", '
-                '"layout_summary": string, "primary_entry_points": string[], "hazard_cues": string[], '
+                '"layout_summary": string, '
+                '"primary_entry_points": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"text_regions": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"action_controls": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"hazard_cues": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
                 '"evidence_gaps": [{"gap_type": string, "reason": string, "suggested_follow_up": string}]}. '
                 f"User prompt: {prompt}\nOCR text: {ocr_text}"
             ),
         )
         primary_entry_points = [
-            SceneElement(
-                element_id=f"entry:{idx}",
-                kind="primary_entry",
-                label=str(item).strip(),
-                salience="high",
-                role="entry_point",
-            )
-            for idx, item in enumerate(payload.get("primary_entry_points", []))
-            if str(item).strip()
+            item
+            for idx, raw in enumerate(payload.get("primary_entry_points", []))
+            if (item := _coerce_element(raw, element_id=f"entry:{idx}", kind="primary_entry", role="entry_point", fallback_bbox=(0.2, 0.2, 0.6, 0.18))) is not None
+        ][:4]
+        text_regions = [
+            item
+            for idx, raw in enumerate(payload.get("text_regions", []))
+            if (item := _coerce_element(raw, element_id=f"text:{idx}", kind="text_region", role="evidence", fallback_bbox=(0.18, 0.2, 0.64, 0.2))) is not None
+        ][:4]
+        action_controls = [
+            item
+            for idx, raw in enumerate(payload.get("action_controls", []))
+            if (item := _coerce_element(raw, element_id=f"control:{idx}", kind="action_control", role="action_target", fallback_bbox=(0.22, 0.58, 0.56, 0.24))) is not None
         ][:4]
         hazard_cues = [
-            SceneElement(
-                element_id=f"hazard:{idx}",
-                kind="hazard_cue",
-                label=str(item).strip(),
-                salience="high",
-                role="risk_signal",
-            )
-            for idx, item in enumerate(payload.get("hazard_cues", []))
-            if str(item).strip()
+            item
+            for idx, raw in enumerate(payload.get("hazard_cues", []))
+            if (item := _coerce_element(raw, element_id=f"hazard:{idx}", kind="hazard_cue", role="risk_signal", fallback_bbox=(0.14, 0.08, 0.72, 0.16))) is not None
         ][:4]
         evidence_gaps = [
             EvidenceGap(
@@ -213,8 +258,10 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
             structure=SceneStructure(
                 layout_summary=str(payload.get("layout_summary", "")).strip(),
                 primary_entry_points=primary_entry_points,
+                text_regions=text_regions,
+                action_controls=action_controls,
                 hazard_cues=hazard_cues,
-                salient_elements=primary_entry_points[:1] or hazard_cues[:1],
+                salient_elements=(text_regions[:1] or action_controls[:1] or primary_entry_points[:1] or hazard_cues[:1]),
             ),
             uncertainty_level=str(payload.get("uncertainty_level", "medium")).strip().lower() or "medium",
             evidence_gaps=evidence_gaps,

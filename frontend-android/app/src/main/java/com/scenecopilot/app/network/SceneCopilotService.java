@@ -1,12 +1,20 @@
 package com.scenecopilot.app.network;
 
 import com.scenecopilot.app.models.AcceptedResponse;
+import com.scenecopilot.app.models.ActionCardExecuteRequest;
+import com.scenecopilot.app.models.ActionCardExecuteResponse;
 import com.scenecopilot.app.models.AudioChunkUploadResponse;
 import com.scenecopilot.app.models.ChatRequest;
+import com.scenecopilot.app.models.ClientIncidentRequest;
+import com.scenecopilot.app.models.ClientIncidentResponse;
 import com.scenecopilot.app.models.DocumentSearchResponse;
 import com.scenecopilot.app.models.RunApprovalRequest;
 import com.scenecopilot.app.models.RunApprovalResponse;
+import com.scenecopilot.app.models.RunCancelResponse;
+import com.scenecopilot.app.models.RunContinueResponse;
 import com.scenecopilot.app.models.RunDetailResponse;
+import com.scenecopilot.app.models.RunReplayResponse;
+import com.scenecopilot.app.models.RunRetryResponse;
 
 import okhttp3.MultipartBody;
 import okhttp3.RequestBody;
@@ -67,9 +75,39 @@ public interface SceneCopilotService {
     @GET("api/runs/{runId}")
     Call<RunDetailResponse> getRun(@Path("runId") String runId);
 
+    @GET("api/runs/{runId}/replay")
+    Call<RunReplayResponse> replayRun(
+            @Path("runId") String runId,
+            @Query("limit") int limit
+    );
+
+    @POST("api/runs/{runId}/retry")
+    Call<RunRetryResponse> retryRun(@Path("runId") String runId);
+
+    @POST("api/runs/{runId}/cancel")
+    Call<RunCancelResponse> cancelRun(@Path("runId") String runId);
+
+    @Multipart
+    @POST("api/runs/{runId}/continue")
+    Call<RunContinueResponse> continueRun(
+            @Path("runId") String runId,
+            @Part MultipartBody.Part image,
+            @Part MultipartBody.Part audio,
+            @Part("visible_text") RequestBody visibleText
+    );
+
     @POST("api/runs/{runId}/approve")
     Call<RunApprovalResponse> resolveApproval(
             @Path("runId") String runId,
             @Body RunApprovalRequest request
     );
+
+    @POST("api/action-cards/{cardId}/execute")
+    Call<ActionCardExecuteResponse> executeActionCard(
+            @Path("cardId") int cardId,
+            @Body ActionCardExecuteRequest request
+    );
+
+    @POST("api/client/incident")
+    Call<ClientIncidentResponse> reportIncident(@Body ClientIncidentRequest request);
 }

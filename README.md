@@ -13,15 +13,27 @@ It is built around three operator surfaces:
 
 - real-time run lifecycle with durable `session_id` and `run_id`
 - explicit `planner -> policy -> services -> providers` execution layering
-- scene OCR, scene analysis, decision recommendation, and approval gating
+- scene OCR, scene analysis, scene-to-action grounding, decision recommendation, and approval gating
 - hybrid document retrieval with chunking, SQLite FTS, and local hashed embeddings
 - optional external search enrichment for explicit operator lookups
-- structured run artifacts, audit trail, approval records, and action cards
+- structured run artifacts, audit trail, approval records, action cards, and grounding evidence
 - bounded scheduler with backpressure and run-scoped SSE streams
 - evaluation harness with latency, retrieval, OCR, and fallback metrics
 - capture profiles that switch client cadence, audio chunking, and backend alignment policy together
 - backend scan-window aggregation that coalesces nearby live frames into one run before OCR, retrieval, and decision work
 - pressure-aware aggregation policy that widens the short capture window when the run queue is busy and rolls windows on scene breaks
+- provider runtime guards with timeout, retry, error classification, and fallback traces
+- per-run stage timing breakdown for `asr / ocr / vision / retrieval / decision / approval / total`
+- queue-pressure execution policy that narrows retrieval, memory carryover, and warmup work under load
+- operator-driven run cancellation for queued, running, and approval-blocked runs
+- run replay and retry flows for reconnecting clients and operator-driven reruns
+- client incident intake for weak network, permission denial, capture failures, and stream reconnects
+- media lifecycle cleanup for orphan uploads and abandoned audio chunk sessions
+- action-card execution flow that can defer, inspect evidence, cancel, or open a continuation run
+- clarification follow-up runs that carry parent decision context instead of starting from a blank slate
+- approval-resume runs that continue from an approved decision as a new linked recovery step
+- optional auth and device-registration skeleton for companion devices and protected deployments
+- CI, Docker, Compose, and Makefile scaffolding for repeatable local and remote validation
 
 ## Runtime Loop
 
@@ -99,7 +111,16 @@ Core routes:
 - `POST /api/scans/analyze`
 - `GET /api/events/{session_id}`
 - `GET /api/runs/{run_id}`
+- `GET /api/runs/{run_id}/replay`
 - `POST /api/runs/{run_id}/approve`
+- `POST /api/runs/{run_id}/cancel`
+- `POST /api/runs/{run_id}/retry`
+- `POST /api/runs/{run_id}/continue`
+- `POST /api/action-cards/{card_id}/execute`
+- `POST /api/client/incident`
+- `POST /api/devices/register`
+- `GET /api/devices`
+- `GET /api/security/profile`
 - `POST /api/documents/upload`
 - `GET /api/documents/search?q=...`
 - `GET /api/dashboard/summary`
@@ -118,6 +139,8 @@ Open `/dashboard` to:
 - upload manuals, SOPs, and reference cards
 - test retrieval with optional external enrichment
 - resolve blocked runs directly from the browser
+- replay, retry, cancel, or continue a selected run from the same deck
+- execute action-card options and report device-side incidents without leaving the deck
 - review the latest evaluation baseline
 
 ### Android Java Field Client
@@ -141,6 +164,8 @@ Open `frontend-android/` in Android Studio. The app currently supports:
 - latest-frame stash support for external wearable bridges that want to keep only one pending frame per session
 - live SSE event stream
 - run detail inspection with artifacts and approvals
+- run replay, retry, cancel, continuation submission, and action-card option execution
+- permission, upload, and stream incident reporting back to the backend audit trail
 - document search
 - Android TTS playback
 
@@ -153,14 +178,20 @@ the base URL in
 - bounded async scheduler with queue backpressure and overload rejection
 - profile-driven scan-window aggregation that reduces duplicate OCR and scene runs during short bursts of motion
 - queue-aware aggregation pressure control, so busy systems prefer one denser run over several near-duplicate scene runs
+- queue-pressure execution policy that can favor fast OCR, suppress optional retrieval, and shrink memory carryover during congestion
 - explicit run states from `queued` through `completed`, `failed`, or `cancelled`
 - code-level policy gates for OCR strategy, retrieval path, and approval flow
 - replaceable OCR, vision, speech, retrieval, embedding, and decision providers
+- provider-attempt tracing with timeout, retry, validation, and failure classification
 - run-scoped artifacts for OCR output, scene observations, retrieval hits, and recommendations
+- grounded scene-to-action references that tie scene anchors, retrieved docs, and next steps together
+- run timing breakdowns persisted with each run for latency forensics
+- replayable stored reasoning events per run, so clients can resync after disconnects
 - SSE replay and run filtering for reconnect-safe clients, with bounded per-subscriber queues that drop oldest events under pressure
 - SQLite WAL mode, FTS-backed search, and durable run/event storage
 - latest-frame stash TTL cleanup and watcher handled-key TTL cleanup to prevent long-lived process state growth
 - buffered scan-window TTL cleanup and metrics so abandoned live windows do not accumulate in memory or on disk
+- orphan-upload and audio-chunk cleanup so transient media does not grow without bound
 - cloud vision uploads are pre-scaled before base64 packaging so provider calls do not blindly forward full-size camera frames
 - process-time response headers and system metrics endpoints
 
@@ -222,6 +253,35 @@ To route speech transcription through the OpenAI transcription API, set:
 SCENECOPILOT_SPEECH_PROVIDER=openai
 OPENAI_API_KEY=...
 SCENECOPILOT_OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
+```
+
+## Security and Device Access
+
+SceneCopilot now includes an opt-in protection layer for deployments beyond local
+demo mode.
+
+- `SCENECOPILOT_AUTH_MODE=disabled` keeps the current zero-friction local workflow
+- `SCENECOPILOT_AUTH_MODE=device_token` enables device-token auth with optional server-key protected registration
+- `POST /api/devices/register` issues a `device_id` and `device_token` for a companion client
+- `GET /api/security/profile` exposes the active auth mode, cloud toggle, and retention window
+- `SCENECOPILOT_ENABLE_CLOUD_MODE` and `SCENECOPILOT_DATA_RETENTION_DAYS` make privacy posture explicit in config and the control deck
+
+The browser control deck and Android client still assume local demo mode by
+default, so auth is disabled unless you turn it on.
+
+## Delivery and Validation
+
+SceneCopilot now ships with repeatable delivery scaffolding:
+
+- `Makefile` for local dev, seed, and backend test shortcuts
+- `Dockerfile` and `docker-compose.yml` for containerized backend startup
+- GitHub Actions workflow at `.github/workflows/backend-checks.yml`
+- backend service-level tests in `backend/tests/`
+
+Example container flow:
+
+```bash
+docker compose up --build
 ```
 
 ## Evaluation Baseline

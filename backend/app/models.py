@@ -72,6 +72,7 @@ class RunDetailResponse(BaseModel):
     current_stage: str | None = None
     output_text: str | None = None
     latency_ms: float | None = None
+    timings_json: dict[str, Any] | None = None
     error_message: str | None = None
     created_at: str
     started_at: str | None = None
@@ -95,6 +96,103 @@ class RunApprovalResponse(BaseModel):
     status: str
     approval_status: str
     reviewer_note: str | None = None
+    continuation_run_id: str | None = None
+    continuation_queue_position: int | None = None
+
+
+class RunCancelResponse(BaseModel):
+    run_id: str
+    status: str
+    cancelled: bool = True
+
+
+class RunRetryResponse(BaseModel):
+    session_id: str
+    run_id: str
+    source_run_id: str
+    accepted: bool = True
+    state: str = "queued"
+    queue_position: int = 0
+
+
+class RunReplayResponse(BaseModel):
+    run_id: str
+    session_id: str
+    status: str
+    current_stage: str | None = None
+    event_count: int = 0
+    latest_event_id: int | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    timings_json: dict[str, Any] | None = None
+
+
+class RunContinueResponse(BaseModel):
+    session_id: str
+    run_id: str
+    accepted: bool = True
+    state: str = "queued"
+    queue_position: int = 0
+
+
+class ActionCardExecuteRequest(BaseModel):
+    option_id: str
+    note: str | None = None
+
+
+class ActionCardExecuteResponse(BaseModel):
+    card_id: int
+    run_id: str
+    option_id: str
+    status: str
+    accepted: bool = True
+    message: str
+    continuation_run_id: str | None = None
+    continuation_state: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClientIncidentRequest(BaseModel):
+    session_id: str
+    incident_type: str = Field(
+        pattern="^(network_drop|weak_network|camera_failure|camera_permission_denied|microphone_failure|microphone_permission_denied|tts_interrupted|backgrounded|upload_failed|stream_reconnect)$"
+    )
+    run_id: str | None = None
+    message: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClientIncidentResponse(BaseModel):
+    accepted: bool = True
+    incident_type: str
+    session_id: str
+    run_id: str | None = None
+
+
+class DeviceRegisterRequest(BaseModel):
+    display_name: str
+    platform: str | None = None
+    client_version: str | None = None
+
+
+class DeviceRegisterResponse(BaseModel):
+    device_id: str
+    device_token: str
+    auth_mode: str
+    cloud_mode_enabled: bool
+    data_retention_days: int
+
+
+class DeviceListResponse(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SecurityProfileResponse(BaseModel):
+    auth_mode: str
+    auth_required: bool
+    open_device_registration: bool
+    cloud_mode_enabled: bool
+    data_retention_days: int
+    device_token_ttl_days: int
 
 
 class SystemMetricsResponse(BaseModel):
@@ -103,3 +201,4 @@ class SystemMetricsResponse(BaseModel):
     frame_stash: dict[str, int]
     watcher: dict[str, int]
     scan_aggregator: dict[str, int]
+    media_lifecycle: dict[str, int]

@@ -195,3 +195,75 @@ def snapshot() -> dict[str, int]:
         "buffered_events": buffered_events,
         "tracked_sessions": len(_SESSION_TOUCHED_AT),
     }
+
+
+def list_persisted_events(
+    session_id: str,
+    *,
+    run_id: str | None = None,
+    after_id: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    conn = get_conn()
+    try:
+        if after_id is None:
+            if run_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, run_id, event_type, payload_json, created_at
+                    FROM reasoning_events
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, run_id, event_type, payload_json, created_at
+                    FROM reasoning_events
+                    WHERE session_id = ? AND run_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (session_id, run_id, limit),
+                ).fetchall()
+            rows = list(reversed(rows))
+        else:
+            if run_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, run_id, event_type, payload_json, created_at
+                    FROM reasoning_events
+                    WHERE session_id = ? AND id > ?
+                    ORDER BY id
+                    LIMIT ?
+                    """,
+                    (session_id, after_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, run_id, event_type, payload_json, created_at
+                    FROM reasoning_events
+                    WHERE session_id = ? AND run_id = ? AND id > ?
+                    ORDER BY id
+                    LIMIT ?
+                    """,
+                    (session_id, run_id, after_id, limit),
+                ).fetchall()
+    finally:
+        conn.close()
+
+    return [
+        {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "run_id": row["run_id"],
+            "event_type": row["event_type"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]

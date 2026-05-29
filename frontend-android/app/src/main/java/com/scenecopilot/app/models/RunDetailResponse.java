@@ -16,6 +16,9 @@ public class RunDetailResponse {
     @SerializedName("status")
     public String status;
 
+    @SerializedName("user_message")
+    public String userMessage;
+
     @SerializedName("route_name")
     public String routeName;
 
@@ -27,6 +30,12 @@ public class RunDetailResponse {
 
     @SerializedName("latency_ms")
     public Double latencyMs;
+
+    @SerializedName("timings_json")
+    public Map<String, Object> timingsJson;
+
+    @SerializedName("input_json")
+    public Map<String, Object> inputJson;
 
     @SerializedName("artifacts")
     public List<Map<String, Object>> artifacts = new ArrayList<>();
@@ -45,6 +54,10 @@ public class RunDetailResponse {
 
     public boolean isAwaitingApproval() {
         return "waiting_for_approval".equals(status);
+    }
+
+    public boolean isAwaitingInput() {
+        return "awaiting_input".equals(status);
     }
 
     public boolean isTerminal() {

@@ -17,6 +17,20 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS devices (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  display_name TEXT NOT NULL,
+  platform TEXT,
+  client_version TEXT,
+  api_token_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -43,6 +57,7 @@ CREATE TABLE IF NOT EXISTS runs (
   current_stage TEXT,
   output_text TEXT,
   latency_ms REAL,
+  timings_json TEXT NOT NULL DEFAULT '{}',
   error_message TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
@@ -181,6 +196,8 @@ CREATE TABLE IF NOT EXISTS run_audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_updated
   ON sessions(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_devices_user_seen
+  ON devices(user_id, last_seen_at DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_session_created
   ON runs(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_user_status
@@ -273,6 +290,8 @@ MIGRATIONS = (
     "ALTER TABLE action_cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'recommendation'",
     "ALTER TABLE action_cards ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE action_cards ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE runs ADD COLUMN timings_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE devices ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
 )
 
 POST_MIGRATION_INDEXES = (
@@ -339,9 +358,11 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "detail_json",
         "input_json",
         "plan_json",
+        "timings_json",
         "context_json",
         "options_json",
         "packet_json",
+        "metadata_json",
     ):
         if key in data and isinstance(data[key], str):
             try:

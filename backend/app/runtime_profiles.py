@@ -60,6 +60,26 @@ class AggregationPolicy:
         }
 
 
+@dataclass(frozen=True)
+class ExecutionPressurePolicy:
+    load_tier: str
+    prefer_fast_ocr: bool
+    warm_retrieval: bool
+    retrieval_limit: int
+    memory_capture_limit: int
+    allow_optional_retrieval: bool
+
+    def as_dict(self) -> dict[str, int | str | bool]:
+        return {
+            "load_tier": self.load_tier,
+            "prefer_fast_ocr": self.prefer_fast_ocr,
+            "warm_retrieval": self.warm_retrieval,
+            "retrieval_limit": self.retrieval_limit,
+            "memory_capture_limit": self.memory_capture_limit,
+            "allow_optional_retrieval": self.allow_optional_retrieval,
+        }
+
+
 _PROFILES: dict[str, RuntimeProfile] = {
     "eco": RuntimeProfile(
         profile_id="eco",
@@ -149,4 +169,52 @@ def resolve_aggregation_policy(
         load_tier=load_tier,
         pending_runs=pending_runs,
         active_runs=active_runs,
+    )
+
+
+def resolve_execution_pressure(
+    scheduler_snapshot: dict[str, int] | None,
+    *,
+    latency_tier: str,
+) -> ExecutionPressurePolicy:
+    snapshot = scheduler_snapshot or {}
+    pending_runs = max(0, int(snapshot.get("pending_runs", 0)))
+    active_runs = max(0, int(snapshot.get("active_runs", 0)))
+    max_pending = max(1, int(snapshot.get("max_pending_runs", 1)))
+    max_concurrent = max(1, int(snapshot.get("max_concurrent_runs", 1)))
+
+    pending_ratio = pending_runs / max_pending
+    active_ratio = active_runs / max_concurrent
+
+    load_tier = "steady"
+    if pending_ratio >= 0.45 or active_ratio >= 0.75:
+        load_tier = "elevated"
+    if pending_ratio >= 0.75 or active_ratio >= 0.95:
+        load_tier = "congested"
+
+    if load_tier == "congested":
+        return ExecutionPressurePolicy(
+            load_tier=load_tier,
+            prefer_fast_ocr=True,
+            warm_retrieval=False,
+            retrieval_limit=2,
+            memory_capture_limit=1 if latency_tier != "text_only" else 0,
+            allow_optional_retrieval=False,
+        )
+    if load_tier == "elevated":
+        return ExecutionPressurePolicy(
+            load_tier=load_tier,
+            prefer_fast_ocr=latency_tier in {"fast", "guided"},
+            warm_retrieval=False,
+            retrieval_limit=3,
+            memory_capture_limit=1,
+            allow_optional_retrieval=True,
+        )
+    return ExecutionPressurePolicy(
+        load_tier="steady",
+        prefer_fast_ocr=False,
+        warm_retrieval=True,
+        retrieval_limit=5,
+        memory_capture_limit=2,
+        allow_optional_retrieval=True,
     )

@@ -25,6 +25,7 @@ from ..db import get_conn, row_to_dict
 from ..ingest import watcher
 from ..runtime import scheduler
 from ..runtime_profiles import DEFAULT_CAPTURE_PROFILE, list_runtime_profiles
+from ..services.auth_service import auth_service
 from ..services.frame_stash_service import frame_stash_service
 from ..services.session_manager import session_manager
 from ..services.window_aggregator_service import window_aggregator_service
@@ -355,11 +356,20 @@ _DASHBOARD_HTML = """<!doctype html>
           <div class="row" style="margin-top:14px;">
             <button id="approveButton" class="warn" style="display:none;">Approve</button>
             <button id="rejectButton" class="reject" style="display:none;">Reject</button>
+            <button id="replayButton" class="secondary">Replay</button>
+            <button id="retryButton" class="secondary">Retry</button>
+            <button id="cancelButton" class="reject">Cancel</button>
+            <button id="continueButton" class="secondary" style="display:none;">Continue with current inputs</button>
           </div>
           <div class="field" id="approvalNoteWrap" style="display:none;">
             <label for="approvalNote">Approval note</label>
             <input id="approvalNote" placeholder="Optional note for this decision" />
           </div>
+          <div class="row" style="margin-top:10px;">
+            <button id="incidentWeakButton" class="secondary">Report Weak Network</button>
+            <button id="incidentCameraButton" class="secondary">Report Camera Issue</button>
+          </div>
+          <div class="pill" id="runActionStatus" style="margin-top:12px;">No run selected</div>
           <div class="split" style="margin-top:14px;">
             <div>
               <h3 style="margin-bottom:10px;">Artifacts</h3>
@@ -424,6 +434,27 @@ _DASHBOARD_HTML = """<!doctype html>
       return JSON.stringify(value, null, 2);
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function renderCardOptions(item) {
+      const options = Array.isArray(item.options_json) ? item.options_json : [];
+      if (!options.length) return '';
+      return `
+        <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+          ${options.map((option) => `
+            <button class="secondary" onclick="executeCardOption(${item.id}, '${escapeHtml(option.option_id)}')">${escapeHtml(option.label || option.option_id)}</button>
+          `).join('')}
+        </div>
+      `;
+    }
+
     async function refreshDashboard() {
       const summary = await fetchJson('/api/dashboard/summary');
       const scheduler = summary.system_metrics.scheduler || {};
@@ -443,6 +474,7 @@ _DASHBOARD_HTML = """<!doctype html>
         { label: 'Latest frame stash', value: `${summary.system_metrics.frame_stash.pending_frames || 0} pending`, hint: `${summary.system_metrics.frame_stash.expired_frames || 0} expired frames waiting for housekeeping` },
         { label: 'Watcher debounce', value: `${summary.system_metrics.watcher.handled_entries || 0} handled keys`, hint: `TTL-backed dedupe map for paired ingest events` },
         { label: 'Scan aggregator', value: `${summary.system_metrics.scan_aggregator.pending_windows || 0} open windows`, hint: `${summary.system_metrics.scan_aggregator.pending_frames || 0} buffered frames · ${summary.system_metrics.scan_aggregator.coalesced_frames || 0} coalesced · ${summary.system_metrics.scan_aggregator.scene_gap_flushes || 0} scene-break flushes · ${summary.system_metrics.scan_aggregator.detached_flushes || 0} detached flushes` },
+        { label: 'Security posture', value: summary.security_profile.auth_mode, hint: `${summary.devices.length} device registrations · cloud ${summary.security_profile.cloud_mode_enabled ? 'enabled' : 'disabled'}` },
         ...summary.capture_profiles.map((item) => ({
           label: `Capture mode · ${item.display_name}`,
           value: `${item.aggregation_delay_ms} ms buffer · ${item.alignment_window_ms} ms align`,
@@ -491,6 +523,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <strong>${item.title}</strong>
           <div>${item.detail}</div>
           <small>${item.priority} · ${item.status}</small>
+          ${renderCardOptions(item)}
         </div>
       `, 'No action cards yet.');
 
@@ -521,12 +554,14 @@ _DASHBOARD_HTML = """<!doctype html>
     async function loadRunDetail() {
       if (!selectedRunId) return;
       const run = await fetchJson(`/api/runs/${selectedRunId}`);
+      const timings = run.timings_json ? `<pre style="margin-top:12px;">${escapeHtml(formatJson(run.timings_json))}</pre>` : '';
       qs('runMeta').innerHTML = `
         <div class="pill">${run.status}</div>
-        <p style="margin-top:10px;"><strong>Prompt:</strong> ${run.user_message}</p>
+        <p style="margin-top:10px;"><strong>Prompt:</strong> ${escapeHtml(run.user_message)}</p>
         <p class="muted" style="margin-top:8px;">Route ${run.route_name || 'n/a'} · Stage ${run.current_stage || 'n/a'} · Latency ${run.latency_ms || 'n/a'} ms</p>
         <p class="muted" style="margin-top:8px;">Session ${run.session_id} · Run ${run.id}</p>
-        <pre style="margin-top:12px;">${run.output_text || 'No final output yet.'}</pre>
+        <pre style="margin-top:12px;">${escapeHtml(run.output_text || 'No final output yet.')}</pre>
+        ${timings}
       `;
       qs('artifactsList').innerHTML = listHtml(run.artifacts, (item) => `
         <div class="item">
@@ -554,6 +589,7 @@ _DASHBOARD_HTML = """<!doctype html>
           <strong>${item.title}</strong>
           <div>${item.detail}</div>
           <small>${item.priority} · ${item.status}</small>
+          ${renderCardOptions(item)}
         </div>
       `, 'No action cards recorded for this run.');
       qs('auditList').innerHTML = listHtml(run.audit_log, (item) => `
@@ -563,9 +599,16 @@ _DASHBOARD_HTML = """<!doctype html>
         </div>
       `, 'No audit events yet.');
       const waiting = run.status === 'waiting_for_approval';
+      const awaitingInput = run.status === 'awaiting_input';
       qs('approveButton').style.display = waiting ? 'inline-block' : 'none';
       qs('rejectButton').style.display = waiting ? 'inline-block' : 'none';
       qs('approvalNoteWrap').style.display = waiting ? 'grid' : 'none';
+      qs('continueButton').style.display = awaitingInput ? 'inline-block' : 'none';
+      qs('runActionStatus').textContent = waiting
+        ? 'This run is waiting for review.'
+        : awaitingInput
+        ? 'This run is waiting for an additional image, audio clip, or visible text hint.'
+        : `Run status: ${run.status}`;
     }
 
     function openStream() {
@@ -591,6 +634,10 @@ _DASHBOARD_HTML = """<!doctype html>
           }
         });
       });
+      source.onerror = () => {
+        appendEvent('stream_error', { payload: { message: 'SSE disconnected. Replaying persisted events.' } });
+        replayRun(false).catch(() => {});
+      };
     }
 
     function appendEvent(eventType, event) {
@@ -677,7 +724,7 @@ _DASHBOARD_HTML = """<!doctype html>
 
     async function resolveApproval(decision) {
       if (!selectedRunId) return;
-      await fetchJson(`/api/runs/${selectedRunId}/approve`, {
+      const payload = await fetchJson(`/api/runs/${selectedRunId}/approve`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -686,8 +733,88 @@ _DASHBOARD_HTML = """<!doctype html>
         }),
       });
       qs('approvalNote').value = '';
+      if (payload.continuation_run_id) {
+        selectedRunId = payload.continuation_run_id;
+      }
       await loadRunDetail();
       await refreshDashboard();
+    }
+
+    async function replayRun(clearExisting = true) {
+      if (!selectedRunId) return;
+      const payload = await fetchJson(`/api/runs/${selectedRunId}/replay?limit=120`);
+      if (clearExisting) {
+        qs('eventsList').innerHTML = '';
+      }
+      payload.events.forEach((event) => appendEvent(event.event_type || 'replay', event));
+      qs('runActionStatus').textContent = `Replayed ${payload.event_count} persisted event(s) for ${payload.run_id}.`;
+    }
+
+    async function retryRun() {
+      if (!selectedRunId) return;
+      const payload = await fetchJson(`/api/runs/${selectedRunId}/retry`, { method: 'POST' });
+      qs('runActionStatus').textContent = `Retry run ${payload.run_id} queued at position ${payload.queue_position}.`;
+      await selectRun(payload.run_id, payload.session_id);
+      await refreshDashboard();
+    }
+
+    async function cancelRun() {
+      if (!selectedRunId) return;
+      await fetchJson(`/api/runs/${selectedRunId}/cancel`, { method: 'POST' });
+      qs('runActionStatus').textContent = `Run ${selectedRunId} was cancelled.`;
+      await loadRunDetail();
+      await refreshDashboard();
+    }
+
+    async function continueRun() {
+      if (!selectedRunId) return;
+      const image = qs('scanImage').files[0];
+      const visibleText = qs('visibleTextInput').value.trim();
+      const form = new FormData();
+      if (image) form.append('image', image);
+      if (visibleText) form.append('visible_text', visibleText);
+      if (!image && !visibleText) {
+        throw new Error('Choose a fresh image or provide visible text before continuing this run.');
+      }
+      const payload = await fetchJson(`/api/runs/${selectedRunId}/continue`, { method: 'POST', body: form });
+      qs('runActionStatus').textContent = `Continuation accepted for ${payload.run_id} at queue position ${payload.queue_position}.`;
+      await selectRun(payload.run_id, payload.session_id);
+      await refreshDashboard();
+    }
+
+    async function executeCardOption(cardId, optionId) {
+      const payload = await fetchJson(`/api/action-cards/${cardId}/execute`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ option_id: optionId }),
+      });
+      qs('runActionStatus').textContent = payload.message || `${optionId} executed.`;
+      const nextRunId = payload.continuation_run_id || payload.run_id;
+      if (nextRunId && selectedSessionId) {
+        await selectRun(nextRunId, selectedSessionId);
+      } else {
+        await loadRunDetail();
+      }
+      await refreshDashboard();
+    }
+
+    async function reportIncident(incidentType, message) {
+      if (!selectedSessionId) {
+        throw new Error('Select a run or launch one before reporting an incident.');
+      }
+      await fetchJson('/api/client/incident', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          session_id: selectedSessionId,
+          run_id: selectedRunId || null,
+          incident_type: incidentType,
+          message,
+          details: { source: 'dashboard' },
+        }),
+      });
+      qs('runActionStatus').textContent = `${incidentType} incident recorded.`;
+      await loadRunDetail();
     }
 
     qs('launchRunButton').addEventListener('click', () => launchRun().catch((err) => qs('launchStatus').textContent = err.message));
@@ -696,6 +823,12 @@ _DASHBOARD_HTML = """<!doctype html>
     qs('searchDocsButton').addEventListener('click', () => searchDocs().catch((err) => alert(err.message)));
     qs('approveButton').addEventListener('click', () => resolveApproval('approve').catch((err) => alert(err.message)));
     qs('rejectButton').addEventListener('click', () => resolveApproval('reject').catch((err) => alert(err.message)));
+    qs('replayButton').addEventListener('click', () => replayRun(true).catch((err) => alert(err.message)));
+    qs('retryButton').addEventListener('click', () => retryRun().catch((err) => alert(err.message)));
+    qs('cancelButton').addEventListener('click', () => cancelRun().catch((err) => alert(err.message)));
+    qs('continueButton').addEventListener('click', () => continueRun().catch((err) => alert(err.message)));
+    qs('incidentWeakButton').addEventListener('click', () => reportIncident('weak_network', 'Operator observed a slow or unstable link in the control deck.').catch((err) => alert(err.message)));
+    qs('incidentCameraButton').addEventListener('click', () => reportIncident('camera_failure', 'Operator reported a capture-side camera issue from the control deck.').catch((err) => alert(err.message)));
 
     refreshDashboard().catch((err) => {
       qs('launchStatus').textContent = err.message;
@@ -726,6 +859,7 @@ async def dashboard_summary() -> dict[str, object]:
             "chunks": conn.execute("SELECT COUNT(*) FROM document_chunks WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
             "action_cards": conn.execute("SELECT COUNT(*) FROM action_cards WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
             "captures": conn.execute("SELECT COUNT(*) FROM scene_captures WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
+            "devices": conn.execute("SELECT COUNT(*) FROM devices WHERE user_id = ?", (DEMO_USER_ID,)).fetchone()[0],
             "pending_approvals": conn.execute(
                 """
                 SELECT COUNT(*)
@@ -740,7 +874,7 @@ async def dashboard_summary() -> dict[str, object]:
             (DEMO_USER_ID,),
         ).fetchall()
         cards = conn.execute(
-            "SELECT id, title, detail, priority, status, created_at FROM action_cards WHERE user_id = ? ORDER BY created_at DESC LIMIT 8",
+            "SELECT id, title, detail, card_type, options_json, priority, status, created_at FROM action_cards WHERE user_id = ? ORDER BY created_at DESC LIMIT 8",
             (DEMO_USER_ID,),
         ).fetchall()
         captures = conn.execute(
@@ -793,6 +927,8 @@ async def dashboard_summary() -> dict[str, object]:
         "recent_runs": recent_runs,
         "system_metrics": system_metrics,
         "provider_profile": _provider_profile(),
+        "security_profile": auth_service.security_profile(),
+        "devices": auth_service.list_devices(limit=8),
         "capture_profiles": [profile.as_dict() for profile in list_runtime_profiles()],
         "default_capture_profile": DEFAULT_CAPTURE_PROFILE,
         "latest_eval": _load_latest_eval(),

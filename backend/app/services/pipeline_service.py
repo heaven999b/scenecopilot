@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..config import DEMO_USER_ID
-from ..domain.runtime_models import ApprovalRecord, ApprovalStatus, ArtifactType, ChoiceCard, FrameRef, SceneObservation
+from ..domain.runtime_models import ApprovalRecord, ApprovalStatus, ArtifactType, ChoiceCard, FrameRef, GroundingReference, SceneObservation
 from ..orchestration.policies import (
     ClarificationPolicyDecision,
     RiskTaxonomyDecision,
@@ -151,6 +151,7 @@ class ScenePipelineService:
         clarification: ClarificationPolicyDecision,
         risk_taxonomy: RiskTaxonomyDecision,
         choice_card: ChoiceCard | None,
+        grounding_refs: list[GroundingReference],
         ocr_text: str,
         retrieved_docs: list,
         retrieved_document_count: int,
@@ -166,10 +167,11 @@ class ScenePipelineService:
             "scene_summary": scene_observation.summary,
             "scene_structure": {
                 "layout_summary": scene_observation.structure.layout_summary,
-                "primary_entry_points": [item.label for item in scene_observation.structure.primary_entry_points],
-                "action_controls": [item.label for item in scene_observation.structure.action_controls],
-                "hazard_cues": [item.label for item in scene_observation.structure.hazard_cues],
-                "salient_elements": [item.label for item in scene_observation.structure.salient_elements],
+                "primary_entry_points": [asdict(item) for item in scene_observation.structure.primary_entry_points],
+                "text_regions": [asdict(item) for item in scene_observation.structure.text_regions],
+                "action_controls": [asdict(item) for item in scene_observation.structure.action_controls],
+                "hazard_cues": [asdict(item) for item in scene_observation.structure.hazard_cues],
+                "salient_elements": [asdict(item) for item in scene_observation.structure.salient_elements],
             },
             "ocr_preview": ocr_text[:200],
             "risk_bucket": risk_taxonomy.risk_bucket,
@@ -178,6 +180,13 @@ class ScenePipelineService:
             "clarification_question": clarification.question,
             "recommended_action": recommendation.recommendation,
             "next_steps": recommendation.next_steps,
+            "approved_action_plan": {
+                "title": recommendation.title,
+                "recommendation": recommendation.recommendation,
+                "next_steps": recommendation.next_steps,
+                "supporting_doc_titles": recommendation.supporting_doc_titles,
+                "grounding_refs": [asdict(item) for item in grounding_refs],
+            },
             "supporting_docs": [
                 {
                     "title": getattr(hit, "title", ""),
@@ -186,6 +195,7 @@ class ScenePipelineService:
                 }
                 for hit in retrieved_docs[:4]
             ],
+            "grounding_refs": [asdict(item) for item in grounding_refs],
             "uncertainty_level": recommendation.uncertainty_level,
             "choice_card": {
                 "card_type": choice_card.card_type,
@@ -213,7 +223,7 @@ class ScenePipelineService:
             run_id=run_id,
             artifact_type=ArtifactType.APPROVAL,
             stage="approval",
-            provider="explicit_safety_policy_v1",
+            provider="explicit_safety_policy_v2",
             content={
                 "status": approval.status.value,
                 "risk_level": approval.risk_level.value,

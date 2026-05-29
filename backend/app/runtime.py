@@ -22,12 +22,14 @@ class RunScheduler:
         self._semaphore = asyncio.Semaphore(self.max_concurrent)
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._task_index: dict[str, asyncio.Task[Any]] = {}
         self._pending = 0
         self._active = 0
         self._submitted = 0
         self._completed = 0
         self._failed = 0
         self._rejected = 0
+        self._cancelled = 0
 
     async def submit(
         self,
@@ -71,8 +73,13 @@ class RunScheduler:
             )
         )
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._task_index[run_id] = task
+        task.add_done_callback(lambda finished: self._cleanup_task(run_id, finished))
         return queue_position
+
+    def _cleanup_task(self, run_id: str, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        self._task_index.pop(run_id, None)
 
     async def _run_reserved(
         self,
@@ -83,53 +90,90 @@ class RunScheduler:
         user_id: int,
         enqueued_at: float,
     ) -> None:
-        async with self._semaphore:
-            queue_wait_ms = round((time.perf_counter() - enqueued_at) * 1000, 2)
-            async with self._lock:
-                self._pending -= 1
-                self._active += 1
-                active_runs = self._active
-                pending_runs = self._pending
-
-            await asyncio.to_thread(session_manager.mark_started, run_id, queue_position=None)
-            await event_bus.emit_event(
-                session_id,
-                "run_started",
-                {
-                    "run_id": run_id,
-                    "queue_wait_ms": queue_wait_ms,
-                    "active_runs": active_runs,
-                    "pending_runs": pending_runs,
-                },
-                run_id=run_id,
-                user_id=user_id,
-            )
-
-            try:
-                await job_factory()
-            except Exception as exc:
+        pending_reserved = True
+        active_reserved = False
+        try:
+            async with self._semaphore:
+                queue_wait_ms = round((time.perf_counter() - enqueued_at) * 1000, 2)
                 async with self._lock:
-                    self._failed += 1
-                await asyncio.to_thread(
-                    session_manager.update_run_status,
-                    run_id,
-                    status=RunStatus.FAILED,
-                    current_stage="runtime_error",
-                    error_message=f"{type(exc).__name__}: {exc}",
-                )
+                    self._pending -= 1
+                    pending_reserved = False
+                    self._active += 1
+                    active_reserved = True
+                    active_runs = self._active
+                    pending_runs = self._pending
+
+                await asyncio.to_thread(session_manager.mark_started, run_id, queue_position=None)
                 await event_bus.emit_event(
                     session_id,
-                    "error",
-                    {"message": f"{type(exc).__name__}: {exc}"},
+                    "run_started",
+                    {
+                        "run_id": run_id,
+                        "queue_wait_ms": queue_wait_ms,
+                        "active_runs": active_runs,
+                        "pending_runs": pending_runs,
+                    },
                     run_id=run_id,
                     user_id=user_id,
                 )
-            else:
-                async with self._lock:
-                    self._completed += 1
-            finally:
+
+                try:
+                    await job_factory()
+                except Exception as exc:
+                    async with self._lock:
+                        self._failed += 1
+                    await asyncio.to_thread(
+                        session_manager.update_run_status,
+                        run_id,
+                        status=RunStatus.FAILED,
+                        current_stage="runtime_error",
+                        error_message=f"{type(exc).__name__}: {exc}",
+                    )
+                    await event_bus.emit_event(
+                        session_id,
+                        "error",
+                        {"message": f"{type(exc).__name__}: {exc}"},
+                        run_id=run_id,
+                        user_id=user_id,
+                    )
+                else:
+                    async with self._lock:
+                        self._completed += 1
+        except asyncio.CancelledError:
+            async with self._lock:
+                self._cancelled += 1
+                if pending_reserved and self._pending > 0:
+                    self._pending -= 1
+                if active_reserved and self._active > 0:
+                    self._active -= 1
+                    active_reserved = False
+            await asyncio.to_thread(
+                session_manager.update_run_status,
+                run_id,
+                status=RunStatus.CANCELLED,
+                current_stage="cancelled",
+                error_message="Run cancelled by operator.",
+            )
+            await event_bus.emit_event(
+                session_id,
+                "cancelled",
+                {"run_id": run_id, "message": "Run cancelled by operator."},
+                run_id=run_id,
+                user_id=user_id,
+            )
+            raise
+        finally:
+            if active_reserved:
                 async with self._lock:
                     self._active -= 1
+
+    async def cancel(self, run_id: str) -> bool:
+        async with self._lock:
+            task = self._task_index.get(run_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
 
     async def shutdown(self, timeout_sec: float = 5.0) -> None:
         if not self._tasks:
@@ -149,7 +193,9 @@ class RunScheduler:
                 "completed_runs": self._completed,
                 "failed_runs": self._failed,
                 "rejected_runs": self._rejected,
+                "cancelled_runs": self._cancelled,
                 "live_tasks": len(self._tasks),
+                "cancellable_runs": len(self._task_index),
             }
 
 

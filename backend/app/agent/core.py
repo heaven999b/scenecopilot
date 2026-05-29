@@ -30,9 +30,12 @@ from ..orchestration.policies import (
     evaluate_clarification_policy,
 )
 from ..providers.registry import provider_bundle
+from ..runtime import scheduler
+from ..runtime_profiles import resolve_execution_pressure
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.choice_manager_service import choice_manager_service
+from ..services.grounding_service import grounding_service
 from ..services.pipeline_service import scene_pipeline_service
 from ..services.scene_memory_service import scene_memory_service
 from ..services.session_manager import session_manager
@@ -89,6 +92,17 @@ def _best_doc_query(user_message: str, transcript: str, ocr_text: str, scene_sum
     return query[:320]
 
 
+def _existing_paths(values: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for value in values:
+        path = str(value or "").strip()
+        if not path:
+            continue
+        if path not in filtered:
+            filtered.append(path)
+    return filtered
+
+
 def _merge_transcripts(parts: list[str]) -> str:
     seen: set[str] = set()
     merged: list[str] = []
@@ -120,6 +134,113 @@ def _default_scene_observation(summary: str) -> SceneObservation:
         risk_level=RiskLevel.LOW,
         provider="runtime_default",
     )
+
+
+def _build_continuation_context(parent_run: dict[str, Any] | None, parent_decision: dict[str, Any] | None, continuation_reason: str | None) -> str:
+    if not parent_run:
+        return ""
+    parts = [
+        f"Continuation reason: {continuation_reason or 'followup'}",
+        f"Parent request: {parent_run.get('user_message') or ''}",
+    ]
+    output_text = str(parent_run.get("output_text") or "").strip()
+    if output_text:
+        parts.append(f"Parent output: {output_text[:280]}")
+    if parent_decision:
+        title = str(parent_decision.get("title") or "").strip()
+        recommendation = str(parent_decision.get("recommendation") or "").strip()
+        clarification_question = str(parent_decision.get("clarification_question") or "").strip()
+        supporting_docs = ", ".join(parent_decision.get("supporting_doc_titles") or [])
+        if title:
+            parts.append(f"Parent decision title: {title}")
+        if recommendation:
+            parts.append(f"Parent recommendation: {recommendation[:240]}")
+        if clarification_question:
+            parts.append(f"Outstanding clarification: {clarification_question}")
+        if supporting_docs:
+            parts.append(f"Previously relevant docs: {supporting_docs}")
+    return " | ".join(part for part in parts if part)
+
+
+def _build_approval_resume_context(approved_action_plan: dict[str, Any] | None) -> str:
+    if not approved_action_plan:
+        return ""
+    parts = ["This run resumes an already approved action plan."]
+    title = str(approved_action_plan.get("approved_title") or "").strip()
+    recommendation = str(approved_action_plan.get("approved_recommendation") or "").strip()
+    reviewer_note = str(approved_action_plan.get("reviewer_note") or "").strip()
+    if title:
+        parts.append(f"Approved title: {title}")
+    if recommendation:
+        parts.append(f"Approved recommendation: {recommendation[:240]}")
+    steps = [str(item).strip() for item in approved_action_plan.get("approved_next_steps", []) if str(item).strip()]
+    if steps:
+        parts.append("Approved steps: " + " | ".join(steps[:4]))
+    supporting_docs = ", ".join(str(item).strip() for item in approved_action_plan.get("supporting_doc_titles", []) if str(item).strip())
+    if supporting_docs:
+        parts.append(f"Approved docs: {supporting_docs}")
+    if reviewer_note:
+        parts.append(f"Reviewer note: {reviewer_note}")
+    return " | ".join(parts)
+
+
+def _apply_approval_resume_bias(
+    *,
+    continuation_reason: str | None,
+    approved_action_plan: dict[str, Any] | None,
+    recommendation: ActionRecommendation,
+    clarification,
+    intervention,
+) -> tuple[ActionRecommendation, Any, Any]:
+    if continuation_reason != "approval_resume" or not approved_action_plan:
+        return recommendation, clarification, intervention
+
+    approved_steps = [
+        str(item).strip()
+        for item in approved_action_plan.get("approved_next_steps", [])
+        if str(item).strip()
+    ]
+    approved_docs = [
+        str(item).strip()
+        for item in approved_action_plan.get("supporting_doc_titles", [])
+        if str(item).strip()
+    ]
+    approved_recommendation = str(approved_action_plan.get("approved_recommendation") or "").strip()
+    approved_title = str(approved_action_plan.get("approved_title") or "").strip()
+
+    merged_steps: list[str] = []
+    for item in approved_steps + recommendation.next_steps:
+        if item and item not in merged_steps:
+            merged_steps.append(item)
+    if merged_steps:
+        recommendation.next_steps = merged_steps[:6]
+    if approved_docs:
+        merged_docs: list[str] = []
+        for item in approved_docs + recommendation.supporting_doc_titles:
+            if item and item not in merged_docs:
+                merged_docs.append(item)
+        recommendation.supporting_doc_titles = merged_docs[:6]
+    if approved_title and recommendation.title:
+        recommendation.title = f"{approved_title} · resume"
+    elif approved_title:
+        recommendation.title = approved_title
+    if approved_recommendation and approved_recommendation not in recommendation.recommendation:
+        recommendation.recommendation = f"{approved_recommendation} Current confirmation: {recommendation.recommendation}"
+
+    recommendation.approval_required = False
+    recommendation.blocked = False
+    if clarification.required and recommendation.uncertainty_level != "high" and approved_steps:
+        clarification.required = False
+        clarification.reason = "A previously approved action plan exists for this continuation."
+        clarification.question = None
+        recommendation.clarification_question = None
+        recommendation.evidence_supported = True
+    if not clarification.required:
+        recommendation.intervention_type = InterventionType.RECOMMEND_ACTION
+        intervention.intervention_type = InterventionType.RECOMMEND_ACTION
+        intervention.show_choice_card = True
+        intervention.reason = "This run resumes an already approved action path and should continue instead of re-requesting approval."
+    return recommendation, clarification, intervention
 
 
 def _compose_final(
@@ -197,6 +318,22 @@ async def _emit_stage(
         payload,
         run_id=run_id,
         user_id=user_id,
+    )
+
+
+async def _record_stage_timing(
+    *,
+    run_id: str,
+    stage_name: str,
+    duration_ms: float,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    await asyncio.to_thread(
+        session_manager.merge_run_timing,
+        run_id,
+        stage_name=stage_name,
+        duration_ms=duration_ms,
+        extra=extra,
     )
 
 
@@ -282,6 +419,30 @@ async def run_agent(
     if session_id is None:
         raise ValueError("session_id is required when run_id is provided")
 
+    run_record: dict[str, Any] | None = None
+    stored_input: dict[str, Any] = {}
+    if run_id is not None:
+        run_record = await asyncio.to_thread(session_manager.get_run, run_id)
+        if run_record is not None:
+            stored_input = dict(run_record.get("input_json") or {})
+            image_paths = _existing_paths(list(image_paths or []) or list(stored_input.get("image_paths") or []))
+            audio_paths = _existing_paths(list(audio_paths or []) or list(stored_input.get("audio_paths") or []))
+            visible_text = visible_text if visible_text is not None else stored_input.get("visible_text_hint")
+            if not prefetched_transcript:
+                prefetched_transcript = stored_input.get("prefetched_transcript")
+            if transcript_source_run_id is None:
+                transcript_source_run_id = stored_input.get("transcript_source_run_id")
+            if not prefetched_transcript_source_run_ids:
+                prefetched_transcript_source_run_ids = stored_input.get("prefetched_transcript_source_run_ids")
+            if not image_paths:
+                maybe_single = str(stored_input.get("image_path") or "").strip()
+                if maybe_single:
+                    image_paths = [maybe_single]
+            if not audio_paths:
+                maybe_single_audio = str(stored_input.get("audio_path") or "").strip()
+                if maybe_single_audio:
+                    audio_paths = [maybe_single_audio]
+
     transcript = (prefetched_transcript or "").strip()
     ocr_text = ""
     scene_summary = "No scene image was provided, so the answer is based on the user request and matching documents only."
@@ -289,6 +450,10 @@ async def run_agent(
     scene_result = _default_scene_observation(scene_summary)
     document_hits: list[dict[str, Any]] = []
     memory_context_text = ""
+    parent_run_id = str(stored_input.get("parent_run_id") or "").strip() or None
+    continuation_reason = str(stored_input.get("continuation_reason") or "").strip() or None
+    parent_decision = stored_input.get("parent_decision") if isinstance(stored_input.get("parent_decision"), dict) else None
+    approved_action_plan = stored_input.get("approved_action_plan") if isinstance(stored_input.get("approved_action_plan"), dict) else None
 
     try:
         await asyncio.to_thread(
@@ -308,9 +473,27 @@ async def run_agent(
             message="Building the execution plan and loading recent session context.",
             user_id=user_id,
         )
-        context = await asyncio.to_thread(_load_recent_context, session_id, user_id)
-        memory_context_text = await asyncio.to_thread(scene_memory_service.summarize_session_memory, session_id)
         latency_tier = choose_latency_tier(user_message, has_image=bool(image_paths))
+        scheduler_snapshot = await scheduler.snapshot()
+        pressure_policy = resolve_execution_pressure(
+            scheduler_snapshot,
+            latency_tier=latency_tier,
+        )
+        context = await asyncio.to_thread(_load_recent_context, session_id, user_id)
+        memory_context_text = await asyncio.to_thread(
+            scene_memory_service.summarize_session_memory,
+            session_id,
+            limit=pressure_policy.memory_capture_limit,
+        )
+        if parent_run_id:
+            parent_run = await asyncio.to_thread(session_manager.get_run, parent_run_id)
+            continuation_context = _build_continuation_context(parent_run, parent_decision, continuation_reason)
+            approval_resume_context = _build_approval_resume_context(approved_action_plan)
+            memory_context_text = " | ".join(
+                part
+                for part in (memory_context_text, continuation_context, approval_resume_context)
+                if part
+            )
         await event_bus.emit_event(
             session_id,
             "run_plan",
@@ -327,7 +510,11 @@ async def run_agent(
                 ],
                 "context_turns": len(context),
                 "latency_tier": latency_tier,
+                "pressure_policy": pressure_policy.as_dict(),
                 "memory_context_available": bool(memory_context_text),
+                "parent_run_id": parent_run_id,
+                "continuation_reason": continuation_reason,
+                "approval_resume_active": bool(approved_action_plan),
             },
             run_id=run_id,
             user_id=user_id,
@@ -341,8 +528,19 @@ async def run_agent(
                 "modalities": [item.value for item in plan.modalities],
                 "latency_tier": latency_tier,
                 "context_turns": len(context),
+                "pressure_policy": pressure_policy.as_dict(),
                 "memory_context_available": bool(memory_context_text),
+                "parent_run_id": parent_run_id,
+                "continuation_reason": continuation_reason,
+                "approval_resume_active": bool(approved_action_plan),
             },
+            user_id=user_id,
+        )
+        await event_bus.emit_event(
+            session_id,
+            "pressure_policy",
+            pressure_policy.as_dict(),
+            run_id=run_id,
             user_id=user_id,
         )
 
@@ -423,13 +621,20 @@ async def run_agent(
                         )
                     )
                 transcript = _merge_transcripts(transcript_parts)
+            asr_latency_ms = timer.sample().duration_ms
+            await _record_stage_timing(
+                run_id=run_id,
+                stage_name="asr",
+                duration_ms=asr_latency_ms,
+                extra={"audio_count": len(audio_paths)},
+            )
             await _emit_artifact(
                 session_id=session_id,
                 run_id=run_id,
                 artifact_type="transcript",
                 payload={
                     "preview": transcript[:180],
-                    "latency_ms": timer.sample().duration_ms,
+                    "latency_ms": asr_latency_ms,
                     "audio_count": len(audio_paths),
                 },
                 user_id=user_id,
@@ -437,7 +642,17 @@ async def run_agent(
             combined_prompt = " ".join(part for part in (user_message, transcript) if part.strip())
 
         ocr_policy = choose_ocr_policy(combined_prompt, bool(image_paths))
+        if pressure_policy.prefer_fast_ocr and image_paths:
+            ocr_policy = type(ocr_policy)(
+                fast_path=True,
+                reason=f"{ocr_policy.reason} Runtime pressure is {pressure_policy.load_tier}, so OCR is forced onto the fast path.",
+            )
         initial_retrieval_policy = choose_retrieval_policy(combined_prompt, bool(image_paths))
+        if not pressure_policy.allow_optional_retrieval and "optional" in initial_retrieval_policy.reason.lower():
+            initial_retrieval_policy = type(initial_retrieval_policy)(
+                required=False,
+                reason="Retrieval was deferred because the runtime is congested and the request is not explicitly grounding-critical.",
+            )
         await _record_audit(
             session_id=session_id,
             run_id=run_id,
@@ -447,6 +662,8 @@ async def run_agent(
                 "ocr_reason": ocr_policy.reason,
                 "retrieval_required": initial_retrieval_policy.required,
                 "retrieval_reason": initial_retrieval_policy.reason,
+                "pressure_load_tier": pressure_policy.load_tier,
+                "retrieval_limit": pressure_policy.retrieval_limit,
             },
             user_id=user_id,
         )
@@ -458,6 +675,8 @@ async def run_agent(
                 "ocr_reason": ocr_policy.reason,
                 "retrieval_required": initial_retrieval_policy.required,
                 "retrieval_reason": initial_retrieval_policy.reason,
+                "pressure_load_tier": pressure_policy.load_tier,
+                "retrieval_limit": pressure_policy.retrieval_limit,
             },
             run_id=run_id,
             user_id=user_id,
@@ -465,7 +684,7 @@ async def run_agent(
 
         warm_retrieval_task: asyncio.Task[list[Any]] | None = None
         warm_embedding_task: asyncio.Task[list[float]] | None = None
-        if initial_retrieval_policy.required and not ocr_policy.fast_path:
+        if initial_retrieval_policy.required and not ocr_policy.fast_path and pressure_policy.warm_retrieval:
             query = combined_prompt[:280]
             warm_embedding_task = asyncio.create_task(
                 scene_pipeline_service.run_embedding(
@@ -483,6 +702,7 @@ async def run_agent(
                         run_id=run_id,
                         query=query,
                         providers=provider_bundle.retrieval,
+                        limit=pressure_policy.retrieval_limit,
                         user_id=user_id,
                     )
                 )
@@ -512,6 +732,13 @@ async def run_agent(
                     user_id=user_id,
                 )
             ocr_text = ocr_result.text
+            ocr_latency_ms = timer.sample().duration_ms
+            await _record_stage_timing(
+                run_id=run_id,
+                stage_name="ocr",
+                duration_ms=ocr_latency_ms,
+                extra={"provider": ocr_result.provider},
+            )
             await _emit_artifact(
                 session_id=session_id,
                 run_id=run_id,
@@ -519,7 +746,7 @@ async def run_agent(
                 payload={
                     "provider": ocr_result.provider,
                     "preview": ocr_text[:180],
-                    "latency_ms": timer.sample().duration_ms,
+                    "latency_ms": ocr_latency_ms,
                 },
                 user_id=user_id,
             )
@@ -544,6 +771,13 @@ async def run_agent(
                 )
             scene_summary = scene_result.summary
             scene_risk = scene_result.risk_level
+            vision_latency_ms = timer.sample().duration_ms
+            await _record_stage_timing(
+                run_id=run_id,
+                stage_name="vision",
+                duration_ms=vision_latency_ms,
+                extra={"provider": scene_result.provider, "risk_level": scene_risk.value},
+            )
             await _emit_artifact(
                 session_id=session_id,
                 run_id=run_id,
@@ -556,7 +790,7 @@ async def run_agent(
                     "uncertainty_level": scene_result.uncertainty_level,
                     "layout_summary": scene_result.structure.layout_summary,
                     "hazard_cues": [item.label for item in scene_result.structure.hazard_cues[:4]],
-                    "latency_ms": timer.sample().duration_ms,
+                    "latency_ms": vision_latency_ms,
                 },
                 user_id=user_id,
             )
@@ -566,6 +800,11 @@ async def run_agent(
             bool(image_paths),
             risk_hint=scene_risk.value if image_paths else None,
         )
+        if not pressure_policy.allow_optional_retrieval and "optional" in refined_retrieval_policy.reason.lower():
+            refined_retrieval_policy = type(refined_retrieval_policy)(
+                required=False,
+                reason="Retrieval was deferred because the runtime is congested and the request is not explicitly grounding-critical.",
+            )
         await _record_audit(
             session_id=session_id,
             run_id=run_id,
@@ -574,6 +813,7 @@ async def run_agent(
                 "required": refined_retrieval_policy.required,
                 "reason": refined_retrieval_policy.reason,
                 "risk_hint": scene_risk.value if image_paths else None,
+                "pressure_load_tier": pressure_policy.load_tier,
             },
             user_id=user_id,
         )
@@ -609,9 +849,17 @@ async def run_agent(
                         run_id=run_id,
                         query=refined_query,
                         providers=provider_bundle.retrieval,
+                        limit=pressure_policy.retrieval_limit,
                         user_id=user_id,
                     )
                     await embedding_task
+            retrieval_latency_ms = timer.sample().duration_ms
+            await _record_stage_timing(
+                run_id=run_id,
+                stage_name="retrieval",
+                duration_ms=retrieval_latency_ms,
+                extra={"hit_count": len(hits)},
+            )
             if image_paths and refined_query and not hits and refined_query != combined_prompt[:280]:
                 await event_bus.emit_event(
                     session_id,
@@ -628,6 +876,7 @@ async def run_agent(
                     run_id=run_id,
                     query=refined_query,
                     providers=provider_bundle.retrieval,
+                    limit=pressure_policy.retrieval_limit,
                     user_id=user_id,
                 )
             document_hits = [
@@ -648,7 +897,7 @@ async def run_agent(
                     "query": refined_query,
                     "hit_count": len(document_hits),
                     "titles": [item["title"] for item in document_hits[:3]],
-                    "latency_ms": timer.sample().duration_ms,
+                    "latency_ms": retrieval_latency_ms,
                 },
                 user_id=user_id,
             )
@@ -683,6 +932,13 @@ async def run_agent(
                 providers=provider_bundle.decision,
                 user_id=user_id,
             )
+        decision_latency_ms = timer.sample().duration_ms
+        await _record_stage_timing(
+            run_id=run_id,
+            stage_name="decision",
+            duration_ms=decision_latency_ms,
+            extra={"doc_count": len(document_hits)},
+        )
         recommendation.uncertainty_level = _merge_uncertainty_levels(
             recommendation.uncertainty_level,
             scene_result.uncertainty_level,
@@ -705,6 +961,13 @@ async def run_agent(
             recommendation=recommendation,
             clarification=clarification,
             risk_taxonomy=risk_taxonomy,
+        )
+        recommendation, clarification, intervention = _apply_approval_resume_bias(
+            continuation_reason=continuation_reason,
+            approved_action_plan=approved_action_plan,
+            recommendation=recommendation,
+            clarification=clarification,
+            intervention=intervention,
         )
         recommendation.intervention_type = intervention.intervention_type
         recommendation.risk_level = risk_taxonomy.risk_level
@@ -739,7 +1002,31 @@ async def run_agent(
                 for item in document_hits
             ],
         )
+        grounding_refs = grounding_service.build_grounding_refs(
+            scene_observation=scene_result,
+            retrieved_docs=[
+                RetrievalHit(
+                    document_id=item["id"],
+                    title=item["title"],
+                    snippet=item["snippet"],
+                    score=float(item["score"]),
+                    source=item["source"],
+                )
+                for item in document_hits
+            ],
+            recommendation=recommendation,
+            ocr_text=ocr_text,
+        )
+        recommendation.grounding_refs = grounding_refs
         recommendation.choice_card = choice_card
+        if choice_card is not None:
+            grounding_hint = grounding_service.summarize_grounding(grounding_refs)
+            if grounding_hint:
+                choice_card.evidence_hint = (
+                    f"{choice_card.evidence_hint} {grounding_hint}".strip()
+                    if choice_card.evidence_hint
+                    else grounding_hint
+                )
         await event_bus.emit_event(
             session_id,
             "policy",
@@ -751,6 +1038,7 @@ async def run_agent(
                 "risk_reason": risk_taxonomy.reason,
                 "intervention_type": recommendation.intervention_type.value,
                 "choice_card_type": choice_card.card_type if choice_card is not None else None,
+                "grounding_count": len(grounding_refs),
             },
             run_id=run_id,
             user_id=user_id,
@@ -767,6 +1055,50 @@ async def run_agent(
                 "approval_mode": risk_taxonomy.approval_mode,
                 "intervention_type": recommendation.intervention_type.value,
                 "memory_context_available": bool(memory_context_text),
+                "grounding_count": len(grounding_refs),
+                "approval_resume_active": bool(approved_action_plan),
+            },
+            user_id=user_id,
+        )
+        await _emit_artifact(
+            session_id=session_id,
+            run_id=run_id,
+            artifact_type="scene_action_grounding",
+            payload={
+                "count": len(grounding_refs),
+                "refs": [
+                    {
+                        "anchor_label": item.anchor_label,
+                        "anchor_type": item.anchor_type,
+                        "action_step": item.action_step,
+                        "doc_title": item.doc_title,
+                        "confidence": item.confidence,
+                    }
+                    for item in grounding_refs
+                ],
+            },
+            user_id=user_id,
+        )
+        await asyncio.to_thread(
+            artifact_service.record_artifact,
+            session_id=session_id,
+            run_id=run_id,
+            artifact_type=ArtifactType.GROUNDING,
+            stage="grounding",
+            provider="scene_action_grounder",
+            content={
+                "refs": [
+                    {
+                        "anchor_type": item.anchor_type,
+                        "anchor_label": item.anchor_label,
+                        "action_step": item.action_step,
+                        "rationale": item.rationale,
+                        "doc_title": item.doc_title,
+                        "support_snippet": item.support_snippet,
+                        "confidence": item.confidence,
+                    }
+                    for item in grounding_refs
+                ],
             },
             user_id=user_id,
         )
@@ -783,7 +1115,8 @@ async def run_agent(
                 "approval_required": recommendation.approval_required,
                 "choice_card_type": choice_card.card_type if choice_card is not None else None,
                 "evidence_supported": recommendation.evidence_supported,
-                "latency_ms": timer.sample().duration_ms,
+                "grounding_count": len(grounding_refs),
+                "latency_ms": decision_latency_ms,
             },
             user_id=user_id,
         )
@@ -796,28 +1129,37 @@ async def run_agent(
             message="Evaluating explicit safety and approval policies.",
             user_id=user_id,
         )
-        approval = await asyncio.to_thread(
-            scene_pipeline_service.evaluate_approval,
-            session_id=session_id,
+        with Timer("approval") as timer:
+            approval = await asyncio.to_thread(
+                scene_pipeline_service.evaluate_approval,
+                session_id=session_id,
+                run_id=run_id,
+                recommendation=recommendation,
+                scene_observation=scene_result,
+                clarification=clarification,
+                risk_taxonomy=risk_taxonomy,
+                choice_card=choice_card,
+                grounding_refs=grounding_refs,
+                ocr_text=ocr_text,
+                retrieved_docs=[
+                    RetrievalHit(
+                        document_id=item["id"],
+                        title=item["title"],
+                        snippet=item["snippet"],
+                        score=float(item["score"]),
+                        source=item["source"],
+                    )
+                    for item in document_hits
+                ],
+                retrieved_document_count=len(document_hits),
+                user_id=user_id,
+            )
+        approval_latency_ms = timer.sample().duration_ms
+        await _record_stage_timing(
             run_id=run_id,
-            recommendation=recommendation,
-            scene_observation=scene_result,
-            clarification=clarification,
-            risk_taxonomy=risk_taxonomy,
-            choice_card=choice_card,
-            ocr_text=ocr_text,
-            retrieved_docs=[
-                RetrievalHit(
-                    document_id=item["id"],
-                    title=item["title"],
-                    snippet=item["snippet"],
-                    score=float(item["score"]),
-                    source=item["source"],
-                )
-                for item in document_hits
-            ],
-            retrieved_document_count=len(document_hits),
-            user_id=user_id,
+            stage_name="approval",
+            duration_ms=approval_latency_ms,
+            extra={"status": approval.status.value, "risk_bucket": risk_taxonomy.risk_bucket},
         )
         await event_bus.emit_event(
             session_id,
@@ -882,6 +1224,12 @@ async def run_agent(
         total_latency_ms = round((time.perf_counter() - run_started) * 1000, 2)
         final_status = RunStatus.WAITING_FOR_APPROVAL if recommendation.blocked else RunStatus.COMPLETED
         final_stage = "approval_gate" if recommendation.blocked else "completed"
+        await _record_stage_timing(
+            run_id=run_id,
+            stage_name="total",
+            duration_ms=total_latency_ms,
+            extra={"status": final_status.value},
+        )
         await _transition_run(
             run_id,
             status=final_status,
@@ -905,6 +1253,7 @@ async def run_agent(
                 "approval_status": approval.status.value,
                 "blocked": recommendation.blocked,
                 "intervention_type": recommendation.intervention_type.value,
+                "timings": (await asyncio.to_thread(session_manager.get_run, run_id)).get("timings_json", {}),
             },
             run_id=run_id,
             user_id=user_id,
@@ -927,6 +1276,15 @@ async def run_agent(
                 "uncertainty_level": recommendation.uncertainty_level,
                 "clarification_question": recommendation.clarification_question,
                 "supporting_doc_titles": recommendation.supporting_doc_titles,
+                "grounding_refs": [
+                    {
+                        "anchor_type": item.anchor_type,
+                        "anchor_label": item.anchor_label,
+                        "action_step": item.action_step,
+                        "doc_title": item.doc_title,
+                    }
+                    for item in recommendation.grounding_refs
+                ],
             },
         }
     except Exception as exc:

@@ -14,4 +14,10 @@ public class RunApprovalResponse {
 
     @SerializedName("reviewer_note")
     public String reviewerNote;
+
+    @SerializedName("continuation_run_id")
+    public String continuationRunId;
+
+    @SerializedName("continuation_queue_position")
+    public Integer continuationQueuePosition;
 }

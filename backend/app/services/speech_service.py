@@ -4,6 +4,7 @@ from ..config import DEMO_USER_ID
 from ..domain.runtime_models import ArtifactType
 from .artifact_service import artifact_service
 from .audit_service import audit_service
+from .provider_runtime_service import provider_runtime_service
 
 
 class SpeechService:
@@ -16,49 +17,54 @@ class SpeechService:
         providers: list[object],
         user_id: int = DEMO_USER_ID,
     ) -> str:
-        last_error = "No speech provider configured."
-        for provider in providers:
-            try:
-                transcript = await provider.transcribe(audio_path)
-                artifact_service.record_artifact(
-                    session_id=session_id,
-                    run_id=run_id,
-                    artifact_type=ArtifactType.TRANSCRIPT,
-                    stage="asr",
-                    provider=getattr(provider, "name", provider.__class__.__name__),
-                    content={
-                        "audio_path": audio_path,
-                        "transcript": transcript,
-                    },
-                    user_id=user_id,
-                )
-                audit_service.record(
-                    session_id=session_id,
-                    run_id=run_id,
-                    event_type="speech_provider_success",
-                    detail={"provider": getattr(provider, "name", "unknown")},
-                    user_id=user_id,
-                )
-                return transcript
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                audit_service.record(
-                    session_id=session_id,
-                    run_id=run_id,
-                    event_type="speech_provider_failure",
-                    detail={"provider": getattr(provider, "name", "unknown"), "error": last_error},
-                    user_id=user_id,
-                )
+        execution = await provider_runtime_service.execute(
+            stage="asr",
+            session_id=session_id,
+            run_id=run_id,
+            providers=providers,
+            invoke=lambda provider: provider.transcribe(audio_path),
+            validate=lambda result: None if isinstance(result, str) else (_ for _ in ()).throw(ValueError("Speech provider returned a non-string transcript")),
+            user_id=user_id,
+        )
+        if execution.value is not None:
+            transcript = execution.value
+            artifact_service.record_artifact(
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type=ArtifactType.TRANSCRIPT,
+                stage="asr",
+                provider=execution.provider_name or "unknown",
+                content={
+                    "audio_path": audio_path,
+                    "transcript": transcript,
+                    "provider_attempts": execution.attempts,
+                    "fallback_used": execution.fallback_used,
+                },
+                user_id=user_id,
+            )
+            audit_service.record(
+                session_id=session_id,
+                run_id=run_id,
+                event_type="speech_provider_success",
+                detail={"provider": execution.provider_name or "unknown"},
+                user_id=user_id,
+            )
+            return transcript
         artifact_service.record_artifact(
             session_id=session_id,
             run_id=run_id,
             artifact_type=ArtifactType.TRANSCRIPT,
             stage="asr",
             provider="fallback",
-            content={"audio_path": audio_path, "transcript": last_error},
+            content={
+                "audio_path": audio_path,
+                "transcript": execution.last_error,
+                "provider_attempts": execution.attempts,
+                "fallback_used": True,
+            },
             user_id=user_id,
         )
-        return last_error
+        return execution.last_error
 
 
 speech_service = SpeechService()

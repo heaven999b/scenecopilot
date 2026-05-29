@@ -7,16 +7,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from .agent import events as event_bus
 from .config import ENABLE_WATCHER, HOUSEKEEPING_INTERVAL_SEC
 from .db import init_db
 from .ingest import watcher
 from .ingest.watcher import start_watcher
-from .routes import audio, chat, dashboard, documents, events, frame_stash, runs, scans, state, system
+from .routes import actions, audio, chat, client, dashboard, devices, documents, events, frame_stash, runs, scans, security, state, system
 from .runtime import scheduler
+from .services.auth_service import auth_service
 from .services.frame_stash_service import frame_stash_service
+from .services.media_lifecycle_service import media_lifecycle_service
 from .services.window_aggregator_service import window_aggregator_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,6 +33,7 @@ async def _housekeeping_loop() -> None:
             await event_bus.cleanup_stale_state()
             watcher.cleanup_handled_state()
             await window_aggregator_service.cleanup_expired()
+            await asyncio.to_thread(media_lifecycle_service.cleanup)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -74,9 +77,21 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_timing(request: Request, call_next):
+    auth_context = auth_service.authenticate_request(request)
+    request.state.scenecopilot_auth = auth_context
+    if auth_context.required and not auth_context.authenticated:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": auth_context.failure_reason or "Authentication required.",
+                "auth_mode": auth_context.auth_mode,
+            },
+        )
     started = time.perf_counter()
     response: Response = await call_next(request)
     response.headers["X-Process-Time-Ms"] = f"{(time.perf_counter() - started) * 1000:.2f}"
+    if auth_context.device_id:
+        response.headers["X-SceneCopilot-Device"] = auth_context.device_id
     return response
 
 
@@ -90,13 +105,17 @@ async def health() -> dict[str, object]:
 
 for router in (
     dashboard.router,
+    actions.router,
     chat.router,
+    client.router,
     audio.router,
+    devices.router,
     documents.router,
     events.router,
     frame_stash.router,
     runs.router,
     scans.router,
+    security.router,
     state.router,
     system.router,
 ):

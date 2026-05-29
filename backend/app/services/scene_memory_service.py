@@ -16,6 +16,36 @@ from .audit_service import audit_service
 
 
 class SceneMemoryService:
+    def _build_choice_preference_summary(self, recent_choices: list[dict[str, Any]]) -> dict[str, Any]:
+        counts = {
+            "capture_close_up": 0,
+            "view_evidence": 0,
+            "view_manual": 0,
+            "open_manual": 0,
+            "defer": 0,
+            "not_now": 0,
+            "request_approval": 0,
+            "cancel": 0,
+        }
+        for item in recent_choices:
+            context = item.get("context_json") or {}
+            option_id = str(context.get("last_option_id") or "").strip().lower()
+            if option_id in counts:
+                counts[option_id] += 1
+        preference = "neutral"
+        if counts["view_evidence"] + counts["view_manual"] + counts["open_manual"] >= 2:
+            preference = "evidence_first"
+        elif counts["capture_close_up"] >= 2:
+            preference = "close_up_first"
+        elif counts["defer"] + counts["not_now"] >= 2:
+            preference = "defer_first"
+        elif counts["request_approval"] >= 1:
+            preference = "approval_seeking"
+        return {
+            "preference": preference,
+            "counts": counts,
+        }
+
     def build_memory_layers(
         self,
         *,
@@ -57,8 +87,10 @@ class SceneMemoryService:
                 for item in recent_captures[:3]
             ],
         }
+        preference_summary = self._build_choice_preference_summary(recent_choices)
         user_choice_memory = {
             "scope": MemoryScope.USER_CHOICE.value,
+            "preference_summary": preference_summary,
             "recent_choice_cards": [
                 {
                     "title": item.get("title"),
@@ -78,14 +110,24 @@ class SceneMemoryService:
 
     def summarize_session_memory(self, session_id: str, *, limit: int = 2) -> str:
         captures = self.list_recent_session_captures(session_id, limit=limit)
-        if not captures:
-            return ""
         parts: list[str] = []
         for item in captures[:limit]:
             summary = str(item.get("scene_summary") or "").strip()
             risk_level = str(item.get("risk_level") or "").strip()
             if summary:
                 parts.append(f"{risk_level}: {summary}")
+        recent_choices = self.list_recent_session_choices(session_id, limit=limit)
+        preference_summary = self._build_choice_preference_summary(recent_choices[:limit])
+        for item in recent_choices[:limit]:
+            context = item.get("context_json") or {}
+            option_id = str(context.get("last_option_id") or "").strip()
+            status = str(item.get("status") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if option_id:
+                parts.append(f"choice:{option_id} -> {status} on {title}")
+        preference = str(preference_summary.get("preference") or "").strip()
+        if preference and preference != "neutral":
+            parts.append(f"operator_preference:{preference}")
         return " | ".join(parts)
 
     def persist_result(
@@ -121,6 +163,18 @@ class SceneMemoryService:
             "uncertainty_level": decision.uncertainty_level,
             "clarification_question": decision.clarification_question,
             "supporting_doc_titles": decision.supporting_doc_titles,
+            "grounding_refs": [
+                {
+                    "anchor_type": item.anchor_type,
+                    "anchor_label": item.anchor_label,
+                    "action_step": item.action_step,
+                    "rationale": item.rationale,
+                    "doc_title": item.doc_title,
+                    "support_snippet": item.support_snippet,
+                    "confidence": item.confidence,
+                }
+                for item in decision.grounding_refs
+            ],
             "choice_card": {
                 "card_type": choice_card.card_type,
                 "headline": choice_card.headline,
@@ -163,12 +217,65 @@ class SceneMemoryService:
                         "user_choice_memory": memory_layers.user_choice_memory,
                         "scene_structure": {
                             "layout_summary": scene_observation.structure.layout_summary,
-                            "primary_entry_points": [item.label for item in scene_observation.structure.primary_entry_points],
-                            "text_regions": [item.label for item in scene_observation.structure.text_regions],
-                            "action_controls": [item.label for item in scene_observation.structure.action_controls],
-                            "hazard_cues": [item.label for item in scene_observation.structure.hazard_cues],
-                            "salient_elements": [item.label for item in scene_observation.structure.salient_elements],
+                            "primary_entry_points": [
+                                {
+                                    "label": item.label,
+                                    "bbox_x": item.bbox_x,
+                                    "bbox_y": item.bbox_y,
+                                    "bbox_w": item.bbox_w,
+                                    "bbox_h": item.bbox_h,
+                                }
+                                for item in scene_observation.structure.primary_entry_points
+                            ],
+                            "text_regions": [
+                                {
+                                    "label": item.label,
+                                    "bbox_x": item.bbox_x,
+                                    "bbox_y": item.bbox_y,
+                                    "bbox_w": item.bbox_w,
+                                    "bbox_h": item.bbox_h,
+                                }
+                                for item in scene_observation.structure.text_regions
+                            ],
+                            "action_controls": [
+                                {
+                                    "label": item.label,
+                                    "bbox_x": item.bbox_x,
+                                    "bbox_y": item.bbox_y,
+                                    "bbox_w": item.bbox_w,
+                                    "bbox_h": item.bbox_h,
+                                }
+                                for item in scene_observation.structure.action_controls
+                            ],
+                            "hazard_cues": [
+                                {
+                                    "label": item.label,
+                                    "bbox_x": item.bbox_x,
+                                    "bbox_y": item.bbox_y,
+                                    "bbox_w": item.bbox_w,
+                                    "bbox_h": item.bbox_h,
+                                }
+                                for item in scene_observation.structure.hazard_cues
+                            ],
+                            "salient_elements": [
+                                {
+                                    "label": item.label,
+                                    "bbox_x": item.bbox_x,
+                                    "bbox_y": item.bbox_y,
+                                    "bbox_w": item.bbox_w,
+                                    "bbox_h": item.bbox_h,
+                                }
+                                for item in scene_observation.structure.salient_elements
+                            ],
                         },
+                        "grounding_refs": [
+                            {
+                                "anchor_label": item.anchor_label,
+                                "action_step": item.action_step,
+                                "doc_title": item.doc_title,
+                            }
+                            for item in decision.grounding_refs
+                        ],
                     }, default=str),
                 ),
             )
@@ -251,6 +358,7 @@ class SceneMemoryService:
             rows = conn.execute(
                 """
                 SELECT action_cards.id, action_cards.title, action_cards.card_type, action_cards.options_json, action_cards.status, action_cards.created_at
+                       , action_cards.context_json
                 FROM action_cards
                 JOIN scene_captures ON scene_captures.id = action_cards.scene_capture_id
                 WHERE scene_captures.session_id = ?
@@ -295,6 +403,59 @@ class SceneMemoryService:
             conn.close()
         return [row_to_dict(row) for row in rows]
 
+    def get_action_card(self, card_id: int) -> dict[str, Any] | None:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT id, scene_capture_id, run_id, title, detail, card_type, options_json, context_json, priority, status, created_at
+                FROM action_cards
+                WHERE id = ?
+                """,
+                (card_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row_to_dict(row) if row is not None else None
+
+    def get_scene_capture(self, capture_id: int) -> dict[str, Any] | None:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT id, session_id, run_id, image_path, prompt, ocr_text, scene_summary, risk_level, decisions_json, context_json, created_at
+                FROM scene_captures
+                WHERE id = ?
+                """,
+                (capture_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row_to_dict(row) if row is not None else None
+
+    def latest_decision_payload_for_run(self, run_id: str) -> dict[str, Any] | None:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT decisions_json
+                FROM scene_captures
+                WHERE run_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        decisions = row_to_dict(row).get("decisions_json") or []
+        if not decisions:
+            return None
+        first = decisions[0]
+        return first if isinstance(first, dict) else None
+
     def update_action_cards_status(self, run_id: str, *, status: str) -> None:
         with conn_ctx() as conn:
             conn.execute(
@@ -304,6 +465,43 @@ class SceneMemoryService:
                 WHERE run_id = ?
                 """,
                 (status, run_id),
+            )
+
+    def update_action_card(
+        self,
+        card_id: int,
+        *,
+        status: str | None = None,
+        context_patch: dict[str, Any] | None = None,
+    ) -> None:
+        with conn_ctx() as conn:
+            row = conn.execute(
+                """
+                SELECT context_json, status
+                FROM action_cards
+                WHERE id = ?
+                """,
+                (card_id,),
+            ).fetchone()
+            if row is None:
+                return
+            current_context = {}
+            raw_context = row["context_json"]
+            if raw_context:
+                try:
+                    current_context = json.loads(raw_context)
+                except json.JSONDecodeError:
+                    current_context = {}
+            if context_patch:
+                current_context.update(context_patch)
+            conn.execute(
+                """
+                UPDATE action_cards
+                SET status = COALESCE(?, status),
+                    context_json = ?
+                WHERE id = ?
+                """,
+                (status, json.dumps(current_context, default=str), card_id),
             )
 
 

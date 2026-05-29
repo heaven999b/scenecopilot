@@ -1,0 +1,12 @@
+services:
+  scenecopilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      SCENECOPILOT_DB_PATH: /app/data/runtime/scenecopilot.db
+      SCENECOPILOT_ENABLE_WATCHER: "0"
+    volumes:
+      - ./backend/data:/app/data

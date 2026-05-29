@@ -1,0 +1,29 @@
+name: Backend Checks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+      - name: Compile backend
+        run: python -m compileall app
+      - name: Seed runtime
+        run: python -m app.seed
+      - name: Run backend tests
+        run: pytest -q

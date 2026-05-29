@@ -26,6 +26,15 @@ _LOCAL_ASR_ERROR: str | None = None
 _LOCAL_ASR_LOCK = threading.Lock()
 
 
+def _bbox(x: float, y: float, w: float, h: float) -> dict[str, float]:
+    return {
+        "bbox_x": x,
+        "bbox_y": y,
+        "bbox_w": w,
+        "bbox_h": h,
+    }
+
+
 def _classify_risk(text: str) -> RiskLevel:
     lower = text.lower()
     if any(token in lower for token in ("danger", "warning", "caution", "hot", "voltage", "biohazard")):
@@ -64,6 +73,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="high",
                 role="evidence",
                 evidence=preview,
+                **_bbox(0.18, 0.18, 0.64, 0.22),
             )
         )
         structure.primary_entry_points.append(
@@ -74,6 +84,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="high",
                 role="entry_point",
                 evidence=preview,
+                **_bbox(0.18, 0.18, 0.64, 0.22),
             )
         )
     if any(token in lower for token in ("button", "switch", "panel", "control", "lever")):
@@ -85,6 +96,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="high",
                 role="action_target",
                 evidence="Control-related language was detected in the prompt or OCR.",
+                **_bbox(0.22, 0.58, 0.56, 0.24),
             )
         )
     if any(token in lower for token in ("warning", "danger", "hazard", "caution", "biohazard", "voltage")):
@@ -96,6 +108,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="high",
                 role="risk_signal",
                 evidence="Risk-related cue detected in prompt, OCR, or filename.",
+                **_bbox(0.14, 0.08, 0.72, 0.16),
             )
         )
     if any(token in lower for token in ("menu", "label", "sign", "tag", "instruction")):
@@ -107,6 +120,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="high",
                 role="inspection_target",
                 evidence="The scene appears text-centric.",
+                **_bbox(0.16, 0.16, 0.68, 0.28),
             )
         )
     if not structure.salient_elements:
@@ -118,6 +132,7 @@ def _infer_scene_structure(prompt: str, ocr_text: str, frame_name: str) -> Scene
                 salience="medium",
                 role="inspection_target",
                 evidence="No more specific structural anchor was inferred.",
+                **_bbox(0.2, 0.18, 0.6, 0.5),
             )
         )
     return structure
@@ -232,6 +247,9 @@ class LocalDecisionProvider:
         lower = f"{prompt} {scene_summary} {ocr_text} {memory_context}".lower()
         risk_level = _classify_risk(lower)
         doc_titles = [hit.title for hit in retrieved_docs[:4]]
+        prefers_evidence = "operator_preference:evidence_first" in lower
+        prefers_close_up = "operator_preference:close_up_first" in lower
+        approval_resume = "resumes an already approved action plan" in lower or "approved recommendation:" in lower
         if any(token in lower for token in ("read", "translate", "text")):
             return ActionRecommendation(
                 title="Read the visible text first",
@@ -267,14 +285,18 @@ class LocalDecisionProvider:
             recommendation += f" I found {len(retrieved_docs)} relevant document(s) to cross-check."
         if scene_structure and scene_structure.primary_entry_points:
             recommendation += " Start from the most salient control or text region before acting."
+        if prefers_evidence:
+            recommendation += " The operator has recently preferred evidence-first review, so lead with the supporting manual or SOP before touching anything."
+        if approval_resume:
+            recommendation += " This run resumes an already approved action, so the guidance should continue that plan unless the scene now contradicts it."
         return ActionRecommendation(
-            title="Inspect, confirm, then act",
+            title="Inspect, confirm, then act" if not approval_resume else "Continue the approved action path",
             recommendation=recommendation,
             risk_level=risk_level,
             next_steps=[
-                "Identify the object, label, or panel in view.",
-                "Confirm any matching instructions from uploaded documents.",
-                "Proceed with the lowest-risk next action and keep capturing context if needed.",
+                "Capture a closer frame of the key control or label first." if prefers_close_up else "Identify the object, label, or panel in view.",
+                "Confirm any matching instructions from uploaded documents." if not prefers_evidence else "Open the strongest supporting manual or SOP and verify the approved step order.",
+                "Proceed with the lowest-risk next action and keep capturing context if needed." if not approval_resume else "Continue with the approved next step and pause only if the current scene no longer matches the approved evidence.",
             ],
             confidence=0.73 if retrieved_docs or ocr_text else 0.58,
             priority="medium",

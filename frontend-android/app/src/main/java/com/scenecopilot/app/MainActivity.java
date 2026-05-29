@@ -19,6 +19,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Surface;
 import android.webkit.MimeTypeMap;
+import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -33,17 +34,25 @@ import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 
+import com.google.android.material.button.MaterialButton;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.scenecopilot.app.databinding.ActivityMainBinding;
 import com.scenecopilot.app.models.AcceptedResponse;
+import com.scenecopilot.app.models.ActionCardExecuteRequest;
+import com.scenecopilot.app.models.ActionCardExecuteResponse;
 import com.scenecopilot.app.models.AudioChunkUploadResponse;
 import com.scenecopilot.app.models.ChatRequest;
+import com.scenecopilot.app.models.ClientIncidentRequest;
 import com.scenecopilot.app.models.DocumentItem;
 import com.scenecopilot.app.models.DocumentSearchResponse;
 import com.scenecopilot.app.models.ReasoningEvent;
 import com.scenecopilot.app.models.RunApprovalRequest;
 import com.scenecopilot.app.models.RunApprovalResponse;
+import com.scenecopilot.app.models.RunCancelResponse;
+import com.scenecopilot.app.models.RunContinueResponse;
 import com.scenecopilot.app.models.RunDetailResponse;
+import com.scenecopilot.app.models.RunReplayResponse;
+import com.scenecopilot.app.models.RunRetryResponse;
 import com.scenecopilot.app.network.ApiClient;
 import com.scenecopilot.app.network.EventStreamManager;
 import com.scenecopilot.app.network.SceneCopilotService;
@@ -56,6 +65,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -211,6 +221,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     return;
                 }
                 binding.statusText.setText(R.string.status_live_permission_denied);
+                reportClientIncident("camera_permission_denied", "Camera permission was denied on the companion app.", null);
             });
 
     private final ActivityResultLauncher<String> audioPermissionLauncher =
@@ -222,6 +233,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 }
                 pendingPushToTalkPermissionRequest = false;
                 binding.statusText.setText(R.string.status_audio_permission_denied);
+                reportClientIncident("microphone_permission_denied", "Microphone permission was denied on the companion app.", null);
             });
 
     @Override
@@ -286,6 +298,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
             fetchRunDetail(currentRunId);
         });
+        binding.replayRunButton.setOnClickListener(v -> replayCurrentRun(true));
+        binding.retryRunButton.setOnClickListener(v -> retryCurrentRun());
+        binding.cancelRunButton.setOnClickListener(v -> cancelCurrentRun());
+        binding.continueRunButton.setOnClickListener(v -> continueAwaitingRun());
         binding.approveRunButton.setOnClickListener(v -> resolveApproval("approve"));
         binding.rejectRunButton.setOnClickListener(v -> resolveApproval("reject"));
     }
@@ -1117,6 +1133,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
             @Override
             public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
+                reportClientIncident("weak_network", "The text request failed before queueing.", null);
                 showError("Chat request failed: " + t.getMessage());
             }
         });
@@ -1156,6 +1173,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
                 @Override
                 public void onFailure(@NonNull Call<AcceptedResponse> call, @NonNull Throwable t) {
+                    reportClientIncident("upload_failed", "The image request failed before queueing.", null);
                     showError("Image analyze failed: " + t.getMessage());
                 }
             });
@@ -1380,6 +1398,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             audioStreamLock.notifyAll();
         }
         audioRecordingStopRequested = true;
+        reportClientIncident("upload_failed", message, null);
         runOnUiThread(() -> {
             binding.recordAudioButton.setEnabled(true);
             binding.recordAudioButton.setText(R.string.record_audio);
@@ -1606,6 +1625,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 liveCaptureDeadlineAtMs = 0L;
                 pendingLiveFrameSignature = null;
                 cleanupFileQuietly(cleanupFile);
+                reportClientIncident("upload_failed", "A scene upload failed during capture.", null);
                 if (liveFrame) {
                     binding.statusText.setText(R.string.status_live_error);
                     return;
@@ -1746,6 +1766,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onFailure(String message) {
                 runOnUiThread(() -> {
+                    reportClientIncident("stream_reconnect", "The event stream disconnected and the companion app is replaying persisted events.", null);
                     if (liveModeEnabled) {
                         liveCaptureInFlight = false;
                         liveCaptureStartedAtMs = 0L;
@@ -1753,9 +1774,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         increaseLiveCadencePressure(false);
                         updateLiveStatsLabel();
                         binding.statusText.setText(R.string.status_live_error);
+                        replayCurrentRun(false);
                         return;
                     }
-                    showError("SSE failed: " + message);
+                    binding.statusText.setText(R.string.status_stream_recovered);
+                    replayCurrentRun(false);
                 });
             }
         });
@@ -1792,20 +1815,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void renderRunDetail(RunDetailResponse run) {
         currentRunId = run.id;
+        currentSessionId = run.sessionId;
         String route = run.routeName != null ? run.routeName : "n/a";
         String stage = run.currentStage != null ? run.currentStage : "n/a";
         String latency = run.latencyMs != null ? String.format(Locale.US, "%.1f ms", run.latencyMs) : "n/a";
+        String timings = run.timingsJson != null && !run.timingsJson.isEmpty()
+                ? "\nTimings: " + run.timingsJson.toString()
+                : "";
         binding.runMetaText.setText(
                 "Run: " + run.id + "\n"
+                        + "Prompt: " + stringValue(run.userMessage) + "\n"
                         + "Status: " + stringValue(run.status) + "\n"
                         + "Route: " + route + "\n"
                         + "Stage: " + stage + "\n"
                         + "Latency: " + latency + "\n"
                         + "Artifacts: " + run.artifacts.size() + " · Action cards: " + run.actionCards.size()
+                        + timings
         );
 
         binding.approvalSummaryText.setText(buildApprovalSummary(run));
         binding.auditSummaryText.setText(buildAuditSummary(run));
+        renderActionCardControls(run);
         if (run.outputText != null && !run.outputText.isEmpty()) {
             binding.summaryText.setText(run.outputText);
         }
@@ -1824,10 +1854,65 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         binding.statusText.setText(run.isAwaitingApproval()
                 ? getString(R.string.status_approval_needed)
+                : run.isAwaitingInput()
+                ? getString(R.string.status_missing_continuation_input)
                 : liveModeEnabled
                 ? getString(R.string.status_live_running, liveSubmittedFrames, liveDroppedFrames)
                 : getString(R.string.status_done));
         setApprovalControlsVisible(run.isAwaitingApproval());
+        binding.continueRunButton.setVisibility(run.isAwaitingInput() ? View.VISIBLE : View.GONE);
+    }
+
+    private void renderActionCardControls(RunDetailResponse run) {
+        binding.actionCardOptionsContainer.removeAllViews();
+        if (run.actionCards == null || run.actionCards.isEmpty()) {
+            binding.actionCardSummaryText.setText(R.string.action_card_summary_placeholder);
+            return;
+        }
+        Map<String, Object> latestCard = run.actionCards.get(run.actionCards.size() - 1);
+        binding.actionCardSummaryText.setText(
+                stringValue(latestCard.get("title"))
+                        + "\n"
+                        + stringValue(latestCard.get("detail"))
+                        + "\nStatus: "
+                        + stringValue(latestCard.get("status"))
+        );
+        Object rawOptions = latestCard.get("options_json");
+        if (!(rawOptions instanceof List<?> optionList) || optionList.isEmpty()) {
+            return;
+        }
+        int cardId = 0;
+        Object rawCardId = latestCard.get("id");
+        if (rawCardId instanceof Number number) {
+            cardId = number.intValue();
+        } else {
+            try {
+                cardId = Integer.parseInt(String.valueOf(rawCardId));
+            } catch (NumberFormatException ignored) {
+                return;
+            }
+        }
+        for (Object item : optionList) {
+            if (!(item instanceof Map<?, ?> option)) {
+                continue;
+            }
+            String optionId = stringValue(option.get("option_id"));
+            String label = stringValue(option.get("label"));
+            if (optionId.isEmpty()) {
+                continue;
+            }
+            MaterialButton button = new MaterialButton(this);
+            button.setText(label.isEmpty() ? optionId : label);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+            params.topMargin = 8;
+            button.setLayoutParams(params);
+            int finalCardId = cardId;
+            button.setOnClickListener(v -> executeActionCardOption(finalCardId, optionId));
+            binding.actionCardOptionsContainer.addView(button);
+        }
     }
 
     private String buildApprovalSummary(RunDetailResponse run) {
@@ -1902,7 +1987,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                             return;
                         }
                         binding.approvalNoteInput.setText("");
-                        fetchRunDetail(currentRunId);
+                        RunApprovalResponse payload = response.body();
+                        if (payload.continuationRunId != null && !payload.continuationRunId.isEmpty()) {
+                            startEventStream(currentSessionId, payload.continuationRunId);
+                        } else {
+                            fetchRunDetail(currentRunId);
+                        }
                     }
 
                     @Override
@@ -1910,6 +2000,194 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         showError("Approval update failed: " + t.getMessage());
                     }
                 });
+    }
+
+    private void replayCurrentRun(boolean clearExisting) {
+        if (currentRunId == null || currentRunId.isEmpty()) {
+            showError("No run selected for replay.");
+            return;
+        }
+        binding.statusText.setText(R.string.status_replaying_run);
+        service.replayRun(currentRunId, 120).enqueue(new Callback<RunReplayResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<RunReplayResponse> call, @NonNull Response<RunReplayResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Replay failed: " + response.code());
+                    return;
+                }
+                RunReplayResponse replay = response.body();
+                if (clearExisting) {
+                    eventAdapter.clear();
+                }
+                for (ReasoningEvent event : replay.events) {
+                    eventAdapter.addEvent(event);
+                }
+                if (!replay.events.isEmpty()) {
+                    binding.eventsRecycler.smoothScrollToPosition(Math.max(0, eventAdapter.getItemCount() - 1));
+                }
+                if (replay.runId != null && replay.sessionId != null) {
+                    currentRunId = replay.runId;
+                    currentSessionId = replay.sessionId;
+                }
+                fetchRunDetail(currentRunId, true);
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<RunReplayResponse> call, @NonNull Throwable t) {
+                showError("Replay failed: " + t.getMessage());
+            }
+        });
+    }
+
+    private void retryCurrentRun() {
+        if (currentRunId == null || currentRunId.isEmpty()) {
+            showError("No run selected for retry.");
+            return;
+        }
+        binding.statusText.setText(R.string.status_retrying_run);
+        service.retryRun(currentRunId).enqueue(new Callback<RunRetryResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<RunRetryResponse> call, @NonNull Response<RunRetryResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Retry failed: " + response.code());
+                    return;
+                }
+                RunRetryResponse payload = response.body();
+                startEventStream(payload.sessionId, payload.runId);
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<RunRetryResponse> call, @NonNull Throwable t) {
+                showError("Retry failed: " + t.getMessage());
+            }
+        });
+    }
+
+    private void cancelCurrentRun() {
+        if (currentRunId == null || currentRunId.isEmpty()) {
+            showError("No run selected for cancellation.");
+            return;
+        }
+        binding.statusText.setText(R.string.status_cancelling_run);
+        service.cancelRun(currentRunId).enqueue(new Callback<RunCancelResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<RunCancelResponse> call, @NonNull Response<RunCancelResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Cancel failed: " + response.code());
+                    return;
+                }
+                fetchRunDetail(currentRunId);
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<RunCancelResponse> call, @NonNull Throwable t) {
+                showError("Cancel failed: " + t.getMessage());
+            }
+        });
+    }
+
+    private void continueAwaitingRun() {
+        if (currentRunId == null || currentRunId.isEmpty()) {
+            showError("No run selected for continuation.");
+            return;
+        }
+        MultipartBody.Part imagePart = null;
+        try {
+            if (capturedImageBytes != null) {
+                imagePart = buildImagePart(capturedImageBytes, "continuation.jpg", "image/jpeg");
+            } else if (selectedImageUri != null) {
+                imagePart = buildImagePart(selectedImageUri);
+            }
+        } catch (IOException exc) {
+            showError("Could not prepare continuation image: " + exc.getMessage());
+            return;
+        }
+        String visibleText = binding.promptInput.getText() != null
+                ? binding.promptInput.getText().toString().trim()
+                : "";
+        RequestBody visibleTextBody = visibleText.isEmpty()
+                ? null
+                : RequestBody.create(visibleText, MediaType.parse("text/plain"));
+        if (imagePart == null && visibleTextBody == null) {
+            binding.statusText.setText(R.string.status_missing_continuation_input);
+            return;
+        }
+        binding.statusText.setText(R.string.status_continuing_run);
+        service.continueRun(currentRunId, imagePart, null, visibleTextBody).enqueue(new Callback<RunContinueResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<RunContinueResponse> call, @NonNull Response<RunContinueResponse> response) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    showError("Continuation failed: " + response.code());
+                    return;
+                }
+                RunContinueResponse payload = response.body();
+                startEventStream(payload.sessionId, payload.runId);
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<RunContinueResponse> call, @NonNull Throwable t) {
+                showError("Continuation failed: " + t.getMessage());
+            }
+        });
+    }
+
+    private void executeActionCardOption(int cardId, String optionId) {
+        binding.statusText.setText(stringValue(optionId));
+        service.executeActionCard(cardId, new ActionCardExecuteRequest(optionId, null))
+                .enqueue(new Callback<ActionCardExecuteResponse>() {
+                    @Override
+                    public void onResponse(@NonNull Call<ActionCardExecuteResponse> call, @NonNull Response<ActionCardExecuteResponse> response) {
+                        if (!response.isSuccessful() || response.body() == null) {
+                            showError("Action card execution failed: " + response.code());
+                            return;
+                        }
+                        ActionCardExecuteResponse payload = response.body();
+                        if (payload.message != null && !payload.message.isEmpty()) {
+                            binding.statusText.setText(payload.message);
+                        }
+                        if (payload.continuationRunId != null && !payload.continuationRunId.isEmpty()) {
+                            startEventStream(currentSessionId, payload.continuationRunId);
+                        } else {
+                            fetchRunDetail(currentRunId);
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull Call<ActionCardExecuteResponse> call, @NonNull Throwable t) {
+                        showError("Action card execution failed: " + t.getMessage());
+                    }
+                });
+    }
+
+    private void reportClientIncident(String incidentType, String message, Map<String, Object> details) {
+        String sessionId = currentSessionId;
+        if (sessionId == null || sessionId.isEmpty()) {
+            sessionId = liveSessionId;
+        }
+        if (sessionId == null || sessionId.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = details != null ? new HashMap<>(details) : new HashMap<>();
+        payload.put("client", "android-java");
+        service.reportIncident(new ClientIncidentRequest(
+                sessionId,
+                incidentType,
+                currentRunId,
+                message,
+                payload
+        )).enqueue(new Callback<com.scenecopilot.app.models.ClientIncidentResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<com.scenecopilot.app.models.ClientIncidentResponse> call, @NonNull Response<com.scenecopilot.app.models.ClientIncidentResponse> response) {
+                if (response.isSuccessful()) {
+                    binding.statusText.setText(R.string.status_incident_recorded);
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<com.scenecopilot.app.models.ClientIncidentResponse> call, @NonNull Throwable t) {
+                // Incident reporting should never interrupt the main UX path.
+            }
+        });
     }
 
     private void searchDocuments() {

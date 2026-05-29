@@ -73,8 +73,8 @@ class SessionManager:
             conn.execute(
                 """
                 INSERT INTO runs
-                  (id, user_id, session_id, trigger, status, route_name, user_message, input_json, plan_json, image_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                  (id, user_id, session_id, trigger, status, route_name, user_message, input_json, plan_json, image_count, timings_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 """,
                 (
                     run_id,
@@ -87,6 +87,7 @@ class SessionManager:
                     input_json,
                     plan_json,
                     image_count,
+                    "{}",
                 ),
             )
         return SessionHandle(session_id=sid, run_id=run_id)
@@ -199,6 +200,40 @@ class SessionManager:
                 ),
             )
 
+    def merge_run_timing(
+        self,
+        run_id: str,
+        *,
+        stage_name: str,
+        duration_ms: float,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        with conn_ctx() as conn:
+            row = conn.execute(
+                "SELECT timings_json FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            timings: dict[str, Any] = {}
+            if row is not None and row["timings_json"]:
+                try:
+                    timings = json.loads(row["timings_json"])
+                except json.JSONDecodeError:
+                    timings = {}
+            stage_payload = {
+                "duration_ms": round(float(duration_ms), 2),
+            }
+            if extra:
+                stage_payload.update(extra)
+            timings[stage_name] = stage_payload
+            conn.execute(
+                """
+                UPDATE runs
+                SET timings_json = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (json.dumps(timings, default=str), run_id),
+            )
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         conn = get_conn()
         try:
@@ -206,7 +241,7 @@ class SessionManager:
                 """
                 SELECT id, user_id, session_id, trigger, status, route_name, user_message,
                        input_json, plan_json, image_count, queue_position, current_stage,
-                       output_text, latency_ms, error_message, created_at, started_at,
+                       output_text, latency_ms, timings_json, error_message, created_at, started_at,
                        completed_at, updated_at
                 FROM runs
                 WHERE id = ?
@@ -223,7 +258,7 @@ class SessionManager:
             rows = conn.execute(
                 """
                 SELECT id, session_id, trigger, status, route_name, user_message,
-                       image_count, queue_position, current_stage, latency_ms,
+                       image_count, queue_position, current_stage, latency_ms, timings_json,
                        error_message, created_at, started_at, completed_at
                 FROM runs
                 WHERE user_id = ?

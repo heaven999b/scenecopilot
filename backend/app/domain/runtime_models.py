@@ -14,6 +14,7 @@ class Modality(StrEnum):
 class RunStatus(StrEnum):
     QUEUED = "queued"
     STARTING = "starting"
+    AWAITING_INPUT = "awaiting_input"
     CAPTURING_CONTEXT = "capturing_context"
     RUNNING_ASR = "running_asr"
     RUNNING_OCR = "running_ocr"
@@ -64,6 +65,7 @@ class ArtifactType(StrEnum):
     OCR = "ocr_artifact"
     SCENE = "scene_observation"
     RETRIEVAL = "retrieval_hits"
+    GROUNDING = "scene_action_grounding"
     DECISION = "action_recommendation"
     APPROVAL = "approval_record"
     TRANSCRIPT = "transcript"
@@ -108,6 +110,10 @@ class SceneElement:
     salience: str = "medium"
     role: str = "context"
     evidence: str | None = None
+    bbox_x: float | None = None
+    bbox_y: float | None = None
+    bbox_w: float | None = None
+    bbox_h: float | None = None
 
 
 @dataclass(slots=True)
@@ -149,6 +155,17 @@ class RetrievalHit:
 
 
 @dataclass(slots=True)
+class GroundingReference:
+    anchor_type: str
+    anchor_label: str
+    action_step: str
+    rationale: str
+    doc_title: str | None = None
+    support_snippet: str | None = None
+    confidence: float | None = None
+
+
+@dataclass(slots=True)
 class ChoiceOption:
     option_id: str
     label: str
@@ -182,6 +199,7 @@ class ActionRecommendation:
     clarification_question: str | None = None
     evidence_supported: bool = True
     supporting_doc_titles: list[str] = field(default_factory=list)
+    grounding_refs: list[GroundingReference] = field(default_factory=list)
     choice_card: ChoiceCard | None = None
 
 
