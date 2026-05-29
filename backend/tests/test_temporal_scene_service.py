@@ -13,7 +13,24 @@ def test_temporal_scene_service_tracks_workflow_transition(isolated_runtime):
         SceneStructure,
     )
     from app.services.scene_memory_service import scene_memory_service
+    from app.services.session_manager import session_manager
     from app.services.temporal_scene_service import temporal_scene_service
+    from app.orchestration.planner import build_default_plan
+
+    plan = build_default_plan(
+        user_message="What should I do next?",
+        has_image=True,
+        has_audio=False,
+    )
+    handle = session_manager.start_run(
+        user_id=1,
+        user_message="What should I do next?",
+        session_id="temporal-session",
+        trigger="chat",
+        image_count=1,
+        input_payload={"image_paths": ["/tmp/prev.jpg"]},
+        plan=plan,
+    )
 
     previous = SceneObservation(
         summary="A warning label above a switch.",
@@ -31,7 +48,7 @@ def test_temporal_scene_service_tracks_workflow_transition(isolated_runtime):
     )
     scene_memory_service.persist_result(
         session_id="temporal-session",
-        run_id="temporal-run-prev",
+        run_id=handle.run_id,
         prompt="What should I do next?",
         image_path="/tmp/prev.jpg",
         ocr_text="Warning",
@@ -72,4 +89,3 @@ def test_temporal_scene_service_tracks_workflow_transition(isolated_runtime):
     assert snapshot["previous_workflow_state"] == "verify_safety"
     assert snapshot["workflow_transition"] == "verify_safety->prepare_action"
     assert "shifted" in snapshot["temporal_delta_summary"]
-

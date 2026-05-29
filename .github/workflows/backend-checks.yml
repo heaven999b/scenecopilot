@@ -19,11 +19,10 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install pytest
+          python -m pip install -e .[dev]
       - name: Compile backend
         run: python -m compileall app
       - name: Seed runtime
         run: python -m app.seed
       - name: Run backend tests
-        run: pytest -q
+        run: python -m pytest -q

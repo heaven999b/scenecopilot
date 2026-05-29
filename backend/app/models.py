@@ -147,6 +147,7 @@ class ActionCardExecuteResponse(BaseModel):
     accepted: bool = True
     message: str
     continuation_run_id: str | None = None
+    continuation_queue_position: int | None = None
     continuation_state: str | None = None
     evidence: dict[str, Any] = Field(default_factory=dict)
 

@@ -9,7 +9,7 @@ backend-seed:
 	cd backend && $(PYTHON) -m app.seed
 
 backend-test:
-	cd backend && $(PYTHON) -m compileall app && pytest -q
+	cd backend && $(PYTHON) -m compileall app && $(PYTHON) -m pytest -q
 
 docker-up:
 	docker compose up --build

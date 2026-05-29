@@ -132,6 +132,7 @@ async def execute_action_card(card_id: int, req: ActionCardExecuteRequest) -> Ac
         status=status,
         message=result["message"],
         continuation_run_id=continuation_run_id,
+        continuation_queue_position=continuation_queue_position,
         continuation_state=result.get("continuation_state"),
         evidence=result.get("evidence") or {},
     )

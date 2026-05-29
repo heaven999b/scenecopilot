@@ -23,6 +23,9 @@ public class ActionCardExecuteResponse {
     @SerializedName("continuation_run_id")
     public String continuationRunId;
 
+    @SerializedName("continuation_queue_position")
+    public Integer continuationQueuePosition;
+
     @SerializedName("continuation_state")
     public String continuationState;
 

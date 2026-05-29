@@ -13,6 +13,23 @@ def test_scene_memory_persists_geometry_and_choice_card(isolated_runtime):
         SceneStructure,
     )
     from app.services.scene_memory_service import scene_memory_service
+    from app.services.session_manager import session_manager
+    from app.orchestration.planner import build_default_plan
+
+    plan = build_default_plan(
+        user_message="What should I do here?",
+        has_image=True,
+        has_audio=False,
+    )
+    handle = session_manager.start_run(
+        user_id=1,
+        user_message="What should I do here?",
+        session_id="sess-memory",
+        trigger="chat",
+        image_count=1,
+        input_payload={"image_paths": ["/tmp/example.jpg"]},
+        plan=plan,
+    )
 
     observation = SceneObservation(
         summary="A control panel with a warning label and a toggle switch.",
@@ -112,7 +129,7 @@ def test_scene_memory_persists_geometry_and_choice_card(isolated_runtime):
 
     ids = scene_memory_service.persist_result(
         session_id="sess-memory",
-        run_id="run-memory",
+        run_id=handle.run_id,
         prompt="What should I do here?",
         image_path="/tmp/example.jpg",
         ocr_text="Warning: isolate power before service.",
