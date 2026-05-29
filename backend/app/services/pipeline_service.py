@@ -9,6 +9,7 @@ from ..orchestration.policies import (
     RiskTaxonomyDecision,
     evaluate_safety_policy,
 )
+from .approval_step_service import approval_step_service
 from .approval_service import approval_service
 from .artifact_service import artifact_service
 from .audit_service import audit_service
@@ -163,16 +164,19 @@ class ScenePipelineService:
             clarification=clarification,
             retrieved_document_count=retrieved_document_count,
         )
+        approved_steps = [
+            {
+                "step_id": f"approved-step-{index + 1}",
+                "title": step,
+                "ordinal": index + 1,
+                "status": "pending",
+                "approved": True,
+            }
+            for index, step in enumerate(recommendation.next_steps)
+        ]
         packet = {
             "scene_summary": scene_observation.summary,
-            "scene_structure": {
-                "layout_summary": scene_observation.structure.layout_summary,
-                "primary_entry_points": [asdict(item) for item in scene_observation.structure.primary_entry_points],
-                "text_regions": [asdict(item) for item in scene_observation.structure.text_regions],
-                "action_controls": [asdict(item) for item in scene_observation.structure.action_controls],
-                "hazard_cues": [asdict(item) for item in scene_observation.structure.hazard_cues],
-                "salient_elements": [asdict(item) for item in scene_observation.structure.salient_elements],
-            },
+            "scene_structure": asdict(scene_observation.structure),
             "ocr_preview": ocr_text[:200],
             "risk_bucket": risk_taxonomy.risk_bucket,
             "risk_reason": risk_taxonomy.reason,
@@ -180,13 +184,28 @@ class ScenePipelineService:
             "clarification_question": clarification.question,
             "recommended_action": recommendation.recommendation,
             "next_steps": recommendation.next_steps,
-            "approved_action_plan": {
+            "approved_action_plan": approval_step_service.normalize({
+                "approved_title": recommendation.title,
+                "approved_recommendation": recommendation.recommendation,
+                "approved_next_steps": recommendation.next_steps,
                 "title": recommendation.title,
                 "recommendation": recommendation.recommendation,
                 "next_steps": recommendation.next_steps,
+                "approved_steps": approved_steps,
+                "step_cursor": 0,
+                "current_step": recommendation.next_steps[0] if recommendation.next_steps else recommendation.recommendation,
+                "pending_steps": recommendation.next_steps,
+                "completed_steps": [],
+                "step_state": "ready",
+                "resume_guard": {
+                    "requires_scene_match": True,
+                    "recheck_on_new_hazard": True,
+                    "block_on_high_uncertainty": True,
+                    "allow_clarification_only_on_contradiction": True,
+                },
                 "supporting_doc_titles": recommendation.supporting_doc_titles,
                 "grounding_refs": [asdict(item) for item in grounding_refs],
-            },
+            }),
             "supporting_docs": [
                 {
                     "title": getattr(hit, "title", ""),

@@ -12,6 +12,10 @@ from ..domain.runtime_models import (
 def _select_anchors(scene_observation: SceneObservation) -> list[SceneElement]:
     structure = scene_observation.structure
     for collection in (
+        structure.hazard_layer,
+        structure.attention_targets,
+        structure.object_layer,
+        structure.text_layer,
         structure.hazard_cues,
         structure.action_controls,
         structure.text_regions,
@@ -54,6 +58,11 @@ class GroundingService:
             support_snippet = (doc.snippet if doc is not None else ocr_text[:180] or scene_observation.summary[:180]).strip()
             rationale = (
                 f"The step is grounded in '{anchor.label}' observed in the scene"
+                + (
+                    f" during workflow state '{scene_observation.structure.workflow_state}'"
+                    if scene_observation.structure.workflow_state
+                    else ""
+                )
                 + (f" and supported by {doc.title}." if doc is not None else ".")
             )
             refs.append(

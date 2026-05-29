@@ -1819,6 +1819,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         String route = run.routeName != null ? run.routeName : "n/a";
         String stage = run.currentStage != null ? run.currentStage : "n/a";
         String latency = run.latencyMs != null ? String.format(Locale.US, "%.1f ms", run.latencyMs) : "n/a";
+        Map<String, Object> latestSceneContext = latestSceneContext(run);
+        Map<String, Object> latestSceneStructure = nestedMap(latestSceneContext, "scene_structure");
+        Map<String, Object> latestChoiceMemory = nestedMap(latestSceneContext, "user_choice_memory");
+        Map<String, Object> operatorControlState = nestedMap(latestChoiceMemory, "operator_control_state");
+        Map<String, Object> approvedPlan = nestedMap(run.inputJson, "approved_action_plan");
+        Map<String, Object> resumeConsistency = latestResumeConsistency(run);
         String timings = run.timingsJson != null && !run.timingsJson.isEmpty()
                 ? "\nTimings: " + run.timingsJson.toString()
                 : "";
@@ -1828,6 +1834,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         + "Status: " + stringValue(run.status) + "\n"
                         + "Route: " + route + "\n"
                         + "Stage: " + stage + "\n"
+                        + "Workflow: " + stringValue(latestSceneStructure.get("workflow_state")) + "\n"
+                        + "Transition: " + stringValue(latestSceneStructure.get("workflow_transition")) + "\n"
+                        + "Operator mode: " + stringValue(operatorControlState.get("control_mode")) + "\n"
+                        + "Approved step: " + stringValue(approvedPlan.get("current_step")) + "\n"
+                        + "Resume check: " + (resumeConsistency.isEmpty() ? "n/a" : (Boolean.TRUE.equals(resumeConsistency.get("conflict")) ? "conflict" : "ok")) + "\n"
                         + "Latency: " + latency + "\n"
                         + "Artifacts: " + run.artifacts.size() + " · Action cards: " + run.actionCards.size()
                         + timings
@@ -1876,6 +1887,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         + stringValue(latestCard.get("detail"))
                         + "\nStatus: "
                         + stringValue(latestCard.get("status"))
+                        + "\nFeedback: "
+                        + stringValue(nestedMap(latestCard, "context_json").get("feedback_family"))
+                        + " · "
+                        + stringValue(nestedMap(latestCard, "context_json").get("feedback_outcome"))
         );
         Object rawOptions = latestCard.get("options_json");
         if (!(rawOptions instanceof List<?> optionList) || optionList.isEmpty()) {
@@ -1941,6 +1956,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 builder.append(stringValue(artifact.get("artifact_type")));
             }
         }
+        Map<String, Object> approvedPlan = nestedMap(run.inputJson, "approved_action_plan");
+        if (!approvedPlan.isEmpty()) {
+            builder.append("\nApproved step: ").append(stringValue(approvedPlan.get("current_step")));
+        }
         return builder.toString();
     }
 
@@ -1965,6 +1984,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     .append(" (")
                     .append(stringValue(latestCard.get("status")))
                     .append(")");
+        }
+        Map<String, Object> resumeConsistency = latestResumeConsistency(run);
+        if (!resumeConsistency.isEmpty()) {
+            builder.append("\nResume consistency: ")
+                    .append(Boolean.TRUE.equals(resumeConsistency.get("conflict")) ? "conflict" : "ok");
+            String reason = stringValue(resumeConsistency.get("reason"));
+            if (!reason.isEmpty()) {
+                builder.append(" · ").append(reason);
+            }
         }
         return builder.toString();
     }
@@ -2259,6 +2287,39 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private String stringValue(Object value) {
         return value == null ? "" : String.valueOf(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> nestedMap(Map<String, Object> parent, String key) {
+        if (parent == null) {
+            return new HashMap<>();
+        }
+        Object value = parent.get(key);
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        return new HashMap<>();
+    }
+
+    private Map<String, Object> latestSceneContext(RunDetailResponse run) {
+        if (run.sceneCaptures == null || run.sceneCaptures.isEmpty()) {
+            return new HashMap<>();
+        }
+        Map<String, Object> latest = run.sceneCaptures.get(run.sceneCaptures.size() - 1);
+        return nestedMap(latest, "context_json");
+    }
+
+    private Map<String, Object> latestResumeConsistency(RunDetailResponse run) {
+        if (run.artifacts == null || run.artifacts.isEmpty()) {
+            return new HashMap<>();
+        }
+        for (int i = run.artifacts.size() - 1; i >= 0; i--) {
+            Map<String, Object> artifact = run.artifacts.get(i);
+            if ("resume_consistency_check".equals(stringValue(artifact.get("artifact_type")))) {
+                return nestedMap(artifact, "content_json");
+            }
+        }
+        return new HashMap<>();
     }
 
     private void speak(String message) {

@@ -64,6 +64,7 @@ class ArtifactType(StrEnum):
     FRAME_WINDOW = "frame_window"
     OCR = "ocr_artifact"
     SCENE = "scene_observation"
+    TEMPORAL_SCENE = "temporal_scene_layer"
     RETRIEVAL = "retrieval_hits"
     GROUNDING = "scene_action_grounding"
     DECISION = "action_recommendation"
@@ -71,6 +72,7 @@ class ArtifactType(StrEnum):
     TRANSCRIPT = "transcript"
     EMBEDDING = "embedding"
     ALIGNMENT = "temporal_alignment"
+    RESUME_CONSISTENCY = "resume_consistency_check"
 
 
 class ApprovalStatus(StrEnum):
@@ -126,6 +128,19 @@ class EvidenceGap:
 @dataclass(slots=True)
 class SceneStructure:
     layout_summary: str = ""
+    workflow_state: str = "observe_context"
+    workflow_reason: str = ""
+    previous_workflow_state: str = ""
+    workflow_transition: str = ""
+    temporal_delta_summary: str = ""
+    attention_summary: str = ""
+    text_layer: list[SceneElement] = field(default_factory=list)
+    object_layer: list[SceneElement] = field(default_factory=list)
+    hazard_layer: list[SceneElement] = field(default_factory=list)
+    attention_targets: list[SceneElement] = field(default_factory=list)
+    persistent_attention_targets: list[SceneElement] = field(default_factory=list)
+    emerging_attention_targets: list[SceneElement] = field(default_factory=list)
+    state_transitions: list[str] = field(default_factory=list)
     primary_entry_points: list[SceneElement] = field(default_factory=list)
     text_regions: list[SceneElement] = field(default_factory=list)
     action_controls: list[SceneElement] = field(default_factory=list)

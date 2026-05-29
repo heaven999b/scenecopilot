@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 from typing import Any
 
@@ -46,6 +47,66 @@ class SceneMemoryService:
             "counts": counts,
         }
 
+    def _build_operator_control_state(self, recent_choices: list[dict[str, Any]]) -> dict[str, Any]:
+        family_counts = {
+            "clarification": 0,
+            "evidence": 0,
+            "approval": 0,
+            "defer": 0,
+            "abort": 0,
+            "accept_guidance": 0,
+        }
+        status_counts: dict[str, int] = {}
+        clarification_followthrough = 0
+        for item in recent_choices:
+            context = item.get("context_json") or {}
+            option_id = str(context.get("last_option_id") or "").strip().lower()
+            status = str(item.get("status") or "").strip().lower() or "unknown"
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if option_id == "capture_close_up":
+                family_counts["clarification"] += 1
+                if status == "continued":
+                    clarification_followthrough += 1
+            elif option_id in {"view_evidence", "view_manual", "open_manual"}:
+                family_counts["evidence"] += 1
+            elif option_id == "request_approval":
+                family_counts["approval"] += 1
+            elif option_id in {"defer", "not_now"}:
+                family_counts["defer"] += 1
+            elif option_id == "cancel":
+                family_counts["abort"] += 1
+            elif option_id == "show_recommendation":
+                family_counts["accept_guidance"] += 1
+
+        preference_summary = self._build_choice_preference_summary(recent_choices)
+        control_mode = "balanced_control"
+        if family_counts["evidence"] >= 2:
+            control_mode = "evidence_control"
+        elif clarification_followthrough >= 1:
+            control_mode = "clarify_with_image"
+        elif family_counts["approval"] >= 1:
+            control_mode = "approval_control"
+        elif family_counts["defer"] >= 2:
+            control_mode = "defer_control"
+        elif family_counts["accept_guidance"] >= 2:
+            control_mode = "direct_guidance"
+
+        followthrough_level = "low"
+        if family_counts["accept_guidance"] + clarification_followthrough + family_counts["approval"] >= 2:
+            followthrough_level = "high"
+        elif any(value > 0 for value in family_counts.values()):
+            followthrough_level = "medium"
+
+        return {
+            "preference": preference_summary["preference"],
+            "control_mode": control_mode,
+            "followthrough_level": followthrough_level,
+            "clarification_followthrough": clarification_followthrough,
+            "family_counts": family_counts,
+            "status_counts": status_counts,
+            "counts": preference_summary["counts"],
+        }
+
     def build_memory_layers(
         self,
         *,
@@ -58,13 +119,18 @@ class SceneMemoryService:
         recent_captures = self.list_recent_session_captures(session_id, limit=3)
         recent_choices = self.list_recent_session_choices(session_id, limit=3)
         previous_capture = recent_captures[0] if recent_captures else None
+        previous_context = previous_capture.get("context_json") if previous_capture else {}
+        previous_structure = previous_context.get("scene_structure") if isinstance(previous_context, dict) else {}
         scene_change_memory = {
             "scope": MemoryScope.SCENE_CHANGE.value,
             "changed_since_last_capture": bool(previous_capture),
             "previous_scene_summary": previous_capture.get("scene_summary") if previous_capture else None,
             "previous_risk_level": previous_capture.get("risk_level") if previous_capture else None,
+            "previous_workflow_state": previous_structure.get("workflow_state") if isinstance(previous_structure, dict) else None,
             "current_scene_summary": scene_observation.summary,
             "current_risk_level": decision.risk_level.value,
+            "current_workflow_state": scene_observation.structure.workflow_state,
+            "temporal_delta_summary": scene_observation.structure.temporal_delta_summary,
         }
         run_memory = {
             "scope": MemoryScope.RUN.value,
@@ -75,6 +141,9 @@ class SceneMemoryService:
             "uncertainty_level": decision.uncertainty_level,
             "intervention_type": decision.intervention_type.value,
             "supporting_doc_titles": decision.supporting_doc_titles,
+            "workflow_state": scene_observation.structure.workflow_state,
+            "attention_summary": scene_observation.structure.attention_summary,
+            "attention_targets": [item.label for item in scene_observation.structure.attention_targets[:3]],
         }
         session_memory = {
             "scope": MemoryScope.SESSION.value,
@@ -82,21 +151,26 @@ class SceneMemoryService:
                 {
                     "scene_summary": item.get("scene_summary"),
                     "risk_level": item.get("risk_level"),
+                    "workflow_state": ((item.get("context_json") or {}).get("scene_structure") or {}).get("workflow_state"),
                     "created_at": item.get("created_at"),
                 }
                 for item in recent_captures[:3]
             ],
         }
         preference_summary = self._build_choice_preference_summary(recent_choices)
+        operator_control_state = self._build_operator_control_state(recent_choices)
         user_choice_memory = {
             "scope": MemoryScope.USER_CHOICE.value,
             "preference_summary": preference_summary,
+            "operator_control_state": operator_control_state,
             "recent_choice_cards": [
                 {
                     "title": item.get("title"),
                     "card_type": item.get("card_type"),
                     "status": item.get("status"),
                     "options": item.get("options_json"),
+                    "last_option_id": (item.get("context_json") or {}).get("last_option_id"),
+                    "feedback_signal": (item.get("context_json") or {}).get("feedback_signal"),
                 }
                 for item in recent_choices[:3]
             ],
@@ -114,10 +188,15 @@ class SceneMemoryService:
         for item in captures[:limit]:
             summary = str(item.get("scene_summary") or "").strip()
             risk_level = str(item.get("risk_level") or "").strip()
+            workflow_state = str((((item.get("context_json") or {}).get("scene_structure") or {}).get("workflow_state")) or "").strip()
             if summary:
-                parts.append(f"{risk_level}: {summary}")
+                prefix = f"{risk_level}: {summary}"
+                if workflow_state:
+                    prefix += f" [{workflow_state}]"
+                parts.append(prefix)
         recent_choices = self.list_recent_session_choices(session_id, limit=limit)
         preference_summary = self._build_choice_preference_summary(recent_choices[:limit])
+        operator_control_state = self._build_operator_control_state(recent_choices[:limit])
         for item in recent_choices[:limit]:
             context = item.get("context_json") or {}
             option_id = str(context.get("last_option_id") or "").strip()
@@ -128,7 +207,17 @@ class SceneMemoryService:
         preference = str(preference_summary.get("preference") or "").strip()
         if preference and preference != "neutral":
             parts.append(f"operator_preference:{preference}")
+        control_mode = str(operator_control_state.get("control_mode") or "").strip()
+        if control_mode:
+            parts.append(f"operator_control_mode:{control_mode}")
+        followthrough = str(operator_control_state.get("followthrough_level") or "").strip()
+        if followthrough:
+            parts.append(f"operator_followthrough:{followthrough}")
         return " | ".join(parts)
+
+    def get_operator_control_state(self, session_id: str, *, limit: int = 4) -> dict[str, Any]:
+        recent_choices = self.list_recent_session_choices(session_id, limit=limit)
+        return self._build_operator_control_state(recent_choices[:limit])
 
     def persist_result(
         self,
@@ -215,59 +304,7 @@ class SceneMemoryService:
                         "session_memory": memory_layers.session_memory,
                         "scene_change_memory": memory_layers.scene_change_memory,
                         "user_choice_memory": memory_layers.user_choice_memory,
-                        "scene_structure": {
-                            "layout_summary": scene_observation.structure.layout_summary,
-                            "primary_entry_points": [
-                                {
-                                    "label": item.label,
-                                    "bbox_x": item.bbox_x,
-                                    "bbox_y": item.bbox_y,
-                                    "bbox_w": item.bbox_w,
-                                    "bbox_h": item.bbox_h,
-                                }
-                                for item in scene_observation.structure.primary_entry_points
-                            ],
-                            "text_regions": [
-                                {
-                                    "label": item.label,
-                                    "bbox_x": item.bbox_x,
-                                    "bbox_y": item.bbox_y,
-                                    "bbox_w": item.bbox_w,
-                                    "bbox_h": item.bbox_h,
-                                }
-                                for item in scene_observation.structure.text_regions
-                            ],
-                            "action_controls": [
-                                {
-                                    "label": item.label,
-                                    "bbox_x": item.bbox_x,
-                                    "bbox_y": item.bbox_y,
-                                    "bbox_w": item.bbox_w,
-                                    "bbox_h": item.bbox_h,
-                                }
-                                for item in scene_observation.structure.action_controls
-                            ],
-                            "hazard_cues": [
-                                {
-                                    "label": item.label,
-                                    "bbox_x": item.bbox_x,
-                                    "bbox_y": item.bbox_y,
-                                    "bbox_w": item.bbox_w,
-                                    "bbox_h": item.bbox_h,
-                                }
-                                for item in scene_observation.structure.hazard_cues
-                            ],
-                            "salient_elements": [
-                                {
-                                    "label": item.label,
-                                    "bbox_x": item.bbox_x,
-                                    "bbox_y": item.bbox_y,
-                                    "bbox_w": item.bbox_w,
-                                    "bbox_h": item.bbox_h,
-                                }
-                                for item in scene_observation.structure.salient_elements
-                            ],
-                        },
+                        "scene_structure": asdict(scene_observation.structure),
                         "grounding_refs": [
                             {
                                 "anchor_label": item.anchor_label,
@@ -340,7 +377,7 @@ class SceneMemoryService:
         try:
             rows = conn.execute(
                 """
-                SELECT id, scene_summary, risk_level, created_at
+                SELECT id, scene_summary, risk_level, context_json, created_at
                 FROM scene_captures
                 WHERE session_id = ?
                 ORDER BY id DESC

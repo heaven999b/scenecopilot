@@ -32,6 +32,7 @@ from ..orchestration.policies import (
 from ..providers.registry import provider_bundle
 from ..runtime import scheduler
 from ..runtime_profiles import resolve_execution_pressure
+from ..services.approval_step_service import approval_step_service
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from ..services.choice_manager_service import choice_manager_service
@@ -39,6 +40,7 @@ from ..services.grounding_service import grounding_service
 from ..services.pipeline_service import scene_pipeline_service
 from ..services.scene_memory_service import scene_memory_service
 from ..services.session_manager import session_manager
+from ..services.temporal_scene_service import temporal_scene_service
 from . import events as event_bus
 
 
@@ -122,6 +124,20 @@ def _merge_uncertainty_levels(first: str, second: str) -> str:
     return first if first_score >= second_score else second
 
 
+def _keywords_from_text(text: str, *, limit: int = 10) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in text.replace("/", " ").replace("-", " ").split():
+        token = "".join(ch for ch in raw.lower() if ch.isalnum())
+        if len(token) < 4 or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= limit:
+            break
+    return tokens
+
+
 def _option_labels(decision: ActionRecommendation) -> str:
     if not decision.choice_card or not decision.choice_card.options:
         return ""
@@ -176,6 +192,12 @@ def _build_approval_resume_context(approved_action_plan: dict[str, Any] | None) 
     steps = [str(item).strip() for item in approved_action_plan.get("approved_next_steps", []) if str(item).strip()]
     if steps:
         parts.append("Approved steps: " + " | ".join(steps[:4]))
+    current_step = str(approved_action_plan.get("current_step") or "").strip()
+    if current_step:
+        parts.append(f"Current approved step: {current_step}")
+    pending_steps = [str(item).strip() for item in approved_action_plan.get("pending_steps", []) if str(item).strip()]
+    if pending_steps:
+        parts.append(f"Pending approved steps: {len(pending_steps)}")
     supporting_docs = ", ".join(str(item).strip() for item in approved_action_plan.get("supporting_doc_titles", []) if str(item).strip())
     if supporting_docs:
         parts.append(f"Approved docs: {supporting_docs}")
@@ -184,17 +206,46 @@ def _build_approval_resume_context(approved_action_plan: dict[str, Any] | None) 
     return " | ".join(parts)
 
 
+def _evaluate_approval_resume_conflict(
+    *,
+    scene_result: SceneObservation,
+    ocr_text: str,
+    approved_action_plan: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = approval_step_service.evaluate_resume_consistency(
+        plan=approved_action_plan,
+        scene_observation=scene_result,
+        ocr_text=ocr_text,
+    )
+    return {
+        "conflict": bool(snapshot.get("conflict")),
+        "reason": str(snapshot.get("reason") or "").strip(),
+        "matched_terms": list(snapshot.get("matched_terms") or []),
+        "current_step": snapshot.get("current_step"),
+        "step_cursor": snapshot.get("step_cursor"),
+        "step_state": snapshot.get("step_state"),
+        "normalized_plan": snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else approved_action_plan,
+    }
+
+
 def _apply_approval_resume_bias(
     *,
     continuation_reason: str | None,
     approved_action_plan: dict[str, Any] | None,
+    scene_result: SceneObservation,
+    ocr_text: str,
     recommendation: ActionRecommendation,
     clarification,
     intervention,
-) -> tuple[ActionRecommendation, Any, Any]:
+) -> tuple[ActionRecommendation, Any, Any, dict[str, Any] | None]:
     if continuation_reason != "approval_resume" or not approved_action_plan:
-        return recommendation, clarification, intervention
+        return recommendation, clarification, intervention, None
 
+    resume_conflict = _evaluate_approval_resume_conflict(
+        scene_result=scene_result,
+        ocr_text=ocr_text,
+        approved_action_plan=approved_action_plan,
+    )
     approved_steps = [
         str(item).strip()
         for item in approved_action_plan.get("approved_next_steps", [])
@@ -207,6 +258,34 @@ def _apply_approval_resume_bias(
     ]
     approved_recommendation = str(approved_action_plan.get("approved_recommendation") or "").strip()
     approved_title = str(approved_action_plan.get("approved_title") or "").strip()
+    current_step = str(approved_action_plan.get("current_step") or "").strip()
+
+    if resume_conflict["conflict"]:
+        clarification.required = True
+        clarification.reason = resume_conflict["reason"]
+        clarification.question = "The approved path no longer cleanly matches the current scene. Capture a fresh close-up or re-check the evidence before continuing."
+        recommendation.title = "Re-check before resuming the approved step"
+        recommendation.recommendation = (
+            f"{resume_conflict['reason']} Capture a fresh view or reopen the evidence before continuing."
+        )
+        recommendation.next_steps = [
+            "Capture a fresh close-up of the current control, label, or warning cue.",
+            "Compare the new scene against the approved evidence and current step.",
+            "If the mismatch remains, re-request approval before proceeding.",
+        ]
+        recommendation.clarification_question = clarification.question
+        recommendation.approval_required = True
+        recommendation.blocked = scene_result.risk_level == RiskLevel.HIGH
+        recommendation.evidence_supported = False
+        recommendation.intervention_type = (
+            InterventionType.REQUIRE_APPROVAL
+            if scene_result.risk_level == RiskLevel.HIGH
+            else InterventionType.ASK_CLARIFICATION
+        )
+        intervention.intervention_type = recommendation.intervention_type
+        intervention.show_choice_card = True
+        intervention.reason = resume_conflict["reason"]
+        return recommendation, clarification, intervention, resume_conflict
 
     merged_steps: list[str] = []
     for item in approved_steps + recommendation.next_steps:
@@ -226,6 +305,8 @@ def _apply_approval_resume_bias(
         recommendation.title = approved_title
     if approved_recommendation and approved_recommendation not in recommendation.recommendation:
         recommendation.recommendation = f"{approved_recommendation} Current confirmation: {recommendation.recommendation}"
+    if current_step:
+        recommendation.recommendation = f"Continue the approved current step: {current_step}. {recommendation.recommendation}"
 
     recommendation.approval_required = False
     recommendation.blocked = False
@@ -239,8 +320,8 @@ def _apply_approval_resume_bias(
         recommendation.intervention_type = InterventionType.RECOMMEND_ACTION
         intervention.intervention_type = InterventionType.RECOMMEND_ACTION
         intervention.show_choice_card = True
-        intervention.reason = "This run resumes an already approved action path and should continue instead of re-requesting approval."
-    return recommendation, clarification, intervention
+        intervention.reason = "This run resumes an already approved action path and should continue the approved current step unless the scene meaningfully changes."
+    return recommendation, clarification, intervention, resume_conflict
 
 
 def _compose_final(
@@ -450,6 +531,7 @@ async def run_agent(
     scene_result = _default_scene_observation(scene_summary)
     document_hits: list[dict[str, Any]] = []
     memory_context_text = ""
+    operator_control_state: dict[str, Any] = {}
     parent_run_id = str(stored_input.get("parent_run_id") or "").strip() or None
     continuation_reason = str(stored_input.get("continuation_reason") or "").strip() or None
     parent_decision = stored_input.get("parent_decision") if isinstance(stored_input.get("parent_decision"), dict) else None
@@ -485,6 +567,11 @@ async def run_agent(
             session_id,
             limit=pressure_policy.memory_capture_limit,
         )
+        operator_control_state = await asyncio.to_thread(
+            scene_memory_service.get_operator_control_state,
+            session_id,
+            limit=pressure_policy.memory_capture_limit,
+        )
         if parent_run_id:
             parent_run = await asyncio.to_thread(session_manager.get_run, parent_run_id)
             continuation_context = _build_continuation_context(parent_run, parent_decision, continuation_reason)
@@ -512,6 +599,7 @@ async def run_agent(
                 "latency_tier": latency_tier,
                 "pressure_policy": pressure_policy.as_dict(),
                 "memory_context_available": bool(memory_context_text),
+                "operator_control_state": operator_control_state,
                 "parent_run_id": parent_run_id,
                 "continuation_reason": continuation_reason,
                 "approval_resume_active": bool(approved_action_plan),
@@ -530,6 +618,7 @@ async def run_agent(
                 "context_turns": len(context),
                 "pressure_policy": pressure_policy.as_dict(),
                 "memory_context_available": bool(memory_context_text),
+                "operator_control_state": operator_control_state,
                 "parent_run_id": parent_run_id,
                 "continuation_reason": continuation_reason,
                 "approval_resume_active": bool(approved_action_plan),
@@ -771,6 +860,11 @@ async def run_agent(
                 )
             scene_summary = scene_result.summary
             scene_risk = scene_result.risk_level
+            temporal_snapshot = await asyncio.to_thread(
+                temporal_scene_service.enrich_observation,
+                session_id=session_id,
+                scene_observation=scene_result,
+            )
             vision_latency_ms = timer.sample().duration_ms
             await _record_stage_timing(
                 run_id=run_id,
@@ -789,9 +883,37 @@ async def run_agent(
                     "tags": scene_result.tags,
                     "uncertainty_level": scene_result.uncertainty_level,
                     "layout_summary": scene_result.structure.layout_summary,
-                    "hazard_cues": [item.label for item in scene_result.structure.hazard_cues[:4]],
+                    "workflow_state": scene_result.structure.workflow_state,
+                    "workflow_transition": scene_result.structure.workflow_transition,
+                    "attention_summary": scene_result.structure.attention_summary,
+                    "hazard_cues": [item.label for item in (scene_result.structure.hazard_layer[:4] or scene_result.structure.hazard_cues[:4])],
+                    "attention_targets": [item.label for item in scene_result.structure.attention_targets[:4]],
                     "latency_ms": vision_latency_ms,
                 },
+                user_id=user_id,
+            )
+            await asyncio.to_thread(
+                artifact_service.record_artifact,
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type=ArtifactType.TEMPORAL_SCENE,
+                stage="vision",
+                provider="temporal_scene_service",
+                content=temporal_snapshot,
+                user_id=user_id,
+            )
+            await _emit_artifact(
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type="temporal_scene_layer",
+                payload=temporal_snapshot,
+                user_id=user_id,
+            )
+            await _record_audit(
+                session_id=session_id,
+                run_id=run_id,
+                event_type="temporal_scene_layer_computed",
+                detail=temporal_snapshot,
                 user_id=user_id,
             )
 
@@ -950,6 +1072,7 @@ async def run_agent(
             ocr_text=ocr_text,
             scene_observation=scene_result,
             retrieved_document_count=len(document_hits),
+            operator_control_state=operator_control_state,
         )
         risk_taxonomy = classify_risk_taxonomy(
             user_message=user_message,
@@ -961,14 +1084,19 @@ async def run_agent(
             recommendation=recommendation,
             clarification=clarification,
             risk_taxonomy=risk_taxonomy,
+            operator_control_state=operator_control_state,
         )
-        recommendation, clarification, intervention = _apply_approval_resume_bias(
+        recommendation, clarification, intervention, resume_consistency = _apply_approval_resume_bias(
             continuation_reason=continuation_reason,
             approved_action_plan=approved_action_plan,
+            scene_result=scene_result,
+            ocr_text=ocr_text,
             recommendation=recommendation,
             clarification=clarification,
             intervention=intervention,
         )
+        if isinstance((resume_consistency or {}).get("normalized_plan"), dict):
+            approved_action_plan = resume_consistency["normalized_plan"]
         recommendation.intervention_type = intervention.intervention_type
         recommendation.risk_level = risk_taxonomy.risk_level
         if clarification.required:
@@ -1001,6 +1129,9 @@ async def run_agent(
                 )
                 for item in document_hits
             ],
+            operator_control_state=operator_control_state,
+            approved_action_plan=approved_action_plan,
+            resume_consistency=resume_consistency,
         )
         grounding_refs = grounding_service.build_grounding_refs(
             scene_observation=scene_result,
@@ -1039,6 +1170,8 @@ async def run_agent(
                 "intervention_type": recommendation.intervention_type.value,
                 "choice_card_type": choice_card.card_type if choice_card is not None else None,
                 "grounding_count": len(grounding_refs),
+                "operator_control_mode": operator_control_state.get("control_mode"),
+                "resume_conflict": bool((resume_consistency or {}).get("conflict")),
             },
             run_id=run_id,
             user_id=user_id,
@@ -1055,11 +1188,37 @@ async def run_agent(
                 "approval_mode": risk_taxonomy.approval_mode,
                 "intervention_type": recommendation.intervention_type.value,
                 "memory_context_available": bool(memory_context_text),
+                "operator_control_state": operator_control_state,
                 "grounding_count": len(grounding_refs),
                 "approval_resume_active": bool(approved_action_plan),
+                "workflow_state": scene_result.structure.workflow_state,
+                "resume_conflict": bool((resume_consistency or {}).get("conflict")),
             },
             user_id=user_id,
         )
+        if approved_action_plan:
+            await asyncio.to_thread(
+                session_manager.merge_run_input,
+                run_id,
+                patch={"approved_action_plan": approved_action_plan},
+            )
+            await asyncio.to_thread(
+                artifact_service.record_artifact,
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type=ArtifactType.RESUME_CONSISTENCY,
+                stage="decision",
+                provider="approval_step_service",
+                content=resume_consistency or {},
+                user_id=user_id,
+            )
+            await _emit_artifact(
+                session_id=session_id,
+                run_id=run_id,
+                artifact_type="resume_consistency_check",
+                payload=resume_consistency or {},
+                user_id=user_id,
+            )
         await _emit_artifact(
             session_id=session_id,
             run_id=run_id,

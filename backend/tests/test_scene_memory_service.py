@@ -19,6 +19,53 @@ def test_scene_memory_persists_geometry_and_choice_card(isolated_runtime):
         risk_level=RiskLevel.MEDIUM,
         structure=SceneStructure(
             layout_summary="warning label above a power switch",
+            workflow_state="verify_safety",
+            temporal_delta_summary="The warning cue still dominates the short scene window.",
+            attention_summary="Confirm the warning label before toggling the switch.",
+            text_layer=[
+                SceneElement(
+                    element_id="text-layer:warning",
+                    kind="text_layer",
+                    label="warning text",
+                    bbox_x=0.18,
+                    bbox_y=0.12,
+                    bbox_w=0.44,
+                    bbox_h=0.22,
+                )
+            ],
+            object_layer=[
+                SceneElement(
+                    element_id="object:panel",
+                    kind="object_cluster",
+                    label="control panel",
+                    bbox_x=0.2,
+                    bbox_y=0.44,
+                    bbox_w=0.58,
+                    bbox_h=0.34,
+                )
+            ],
+            hazard_layer=[
+                SceneElement(
+                    element_id="hazard:warning",
+                    kind="hazard_layer",
+                    label="warning cue",
+                    bbox_x=0.14,
+                    bbox_y=0.08,
+                    bbox_w=0.52,
+                    bbox_h=0.18,
+                )
+            ],
+            attention_targets=[
+                SceneElement(
+                    element_id="attention:warning",
+                    kind="attention_target",
+                    label="warning label",
+                    bbox_x=0.18,
+                    bbox_y=0.12,
+                    bbox_w=0.44,
+                    bbox_h=0.22,
+                )
+            ],
             text_regions=[
                 SceneElement(
                     element_id="text:warning",
@@ -76,6 +123,8 @@ def test_scene_memory_persists_geometry_and_choice_card(isolated_runtime):
     capture = scene_memory_service.get_scene_capture(ids["scene_capture_id"])
     card = scene_memory_service.get_action_card(ids["action_card_id"])
 
+    assert capture["context_json"]["scene_structure"]["workflow_state"] == "verify_safety"
+    assert capture["context_json"]["scene_structure"]["attention_targets"][0]["label"] == "warning label"
     assert capture["context_json"]["scene_structure"]["text_regions"][0]["bbox_x"] == 0.18
     assert capture["context_json"]["scene_structure"]["action_controls"][0]["label"] == "power switch"
     assert card["options_json"][0]["option_id"] == "capture_close_up"

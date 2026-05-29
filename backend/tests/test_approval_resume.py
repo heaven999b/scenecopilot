@@ -97,4 +97,9 @@ def test_approval_resume_payload_carries_approved_action_plan(isolated_runtime):
     assert payload["approval_resume_active"] is True
     assert payload["approved_action_plan"]["approved_title"] == "Pause before toggling the switch"
     assert payload["approved_action_plan"]["approved_next_steps"][0] == "Read the warning label"
+    assert payload["approved_action_plan"]["current_step"] == "Read the warning label"
+    assert payload["approved_action_plan"]["step_cursor"] == 0
+    assert payload["approved_action_plan"]["pending_steps"] == decision.next_steps
+    assert payload["approved_action_plan"]["approved_steps"][0]["step_id"] == "approved-step-1"
+    assert payload["approved_action_plan"]["resume_guard"]["requires_scene_match"] is True
     assert payload["approved_action_plan"]["reviewer_note"] == "Proceed with caution."

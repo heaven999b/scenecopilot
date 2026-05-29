@@ -6,12 +6,28 @@ from typing import Any
 from ..config import DEMO_USER_ID
 from ..domain.runtime_models import RunStatus
 from ..orchestration.planner import build_default_plan
+from .approval_step_service import approval_step_service
 from .scene_memory_service import scene_memory_service
 from .session_manager import SessionHandle, session_manager
 
 
 def _existing_paths(values: list[str]) -> list[str]:
     return [path for path in values if path and Path(path).exists()]
+
+
+def _focus_terms(*values: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for raw in value.replace("/", " ").replace("-", " ").split():
+            token = "".join(ch for ch in raw.lower() if ch.isalnum())
+            if len(token) < 4 or token in seen:
+                continue
+            seen.add(token)
+            terms.append(token)
+            if len(terms) >= 10:
+                return terms
+    return terms
 
 
 class ContinuationService:
@@ -36,10 +52,39 @@ class ContinuationService:
         next_steps = [str(item).strip() for item in decision_payload.get("next_steps", []) if str(item).strip()]
         if not next_steps:
             next_steps = [str(item).strip() for item in packet.get("next_steps", []) if str(item).strip()]
+        approved_title = str(decision_payload.get("title") or packet.get("recommended_action") or "").strip()
+        approved_recommendation = str(decision_payload.get("recommendation") or packet.get("recommended_action") or "").strip()
+        step_objects = [
+            {
+                "step_id": f"approved-step-{index + 1}",
+                "title": step,
+                "ordinal": index + 1,
+                "status": "pending",
+                "approved": True,
+            }
+            for index, step in enumerate(next_steps)
+        ]
         return {
-            "approved_title": str(decision_payload.get("title") or packet.get("recommended_action") or "").strip(),
-            "approved_recommendation": str(decision_payload.get("recommendation") or packet.get("recommended_action") or "").strip(),
+            "approved_title": approved_title,
+            "approved_recommendation": approved_recommendation,
             "approved_next_steps": next_steps,
+            "approved_steps": step_objects,
+            "step_cursor": 0,
+            "current_step": next_steps[0] if next_steps else approved_recommendation or approved_title or None,
+            "pending_steps": next_steps,
+            "completed_steps": [],
+            "step_state": "ready",
+            "resume_guard": {
+                "requires_scene_match": True,
+                "recheck_on_new_hazard": True,
+                "block_on_high_uncertainty": True,
+                "allow_clarification_only_on_contradiction": True,
+            },
+            "resume_focus_terms": _focus_terms(
+                approved_title,
+                approved_recommendation,
+                " ".join(next_steps),
+            ),
             "supporting_doc_titles": supporting_docs,
             "grounding_refs": grounding_refs,
             "reviewer_note": (reviewer_note or "").strip() or None,
@@ -56,6 +101,7 @@ class ContinuationService:
         prompt_override: str | None = None,
         requires_media: bool = False,
         approval_packet_override: dict[str, Any] | None = None,
+        approved_action_plan_override: dict[str, Any] | None = None,
         reviewer_note: str | None = None,
     ) -> dict[str, Any]:
         input_json = dict(source_run.get("input_json") or {})
@@ -83,11 +129,16 @@ class ContinuationService:
             "required_followup_media": "image" if requires_media else None,
         })
         if continuation_reason == "approval_resume":
-            payload["approved_action_plan"] = self._build_approved_action_plan(
-                decision_payload=decision_payload,
-                approval_packet_override=approval_packet_override,
-                reviewer_note=reviewer_note,
-            )
+            if approved_action_plan_override is not None:
+                payload["approved_action_plan"] = approval_step_service.normalize(approved_action_plan_override)
+            else:
+                payload["approved_action_plan"] = approval_step_service.normalize(
+                    self._build_approved_action_plan(
+                        decision_payload=decision_payload,
+                        approval_packet_override=approval_packet_override,
+                        reviewer_note=reviewer_note,
+                    )
+                )
             payload["approval_resume_active"] = True
         payload["image_paths"] = [] if requires_media else image_paths
         payload["audio_paths"] = audio_paths
@@ -107,6 +158,7 @@ class ContinuationService:
         trigger: str,
         user_id: int = DEMO_USER_ID,
         approval_packet_override: dict[str, Any] | None = None,
+        approved_action_plan_override: dict[str, Any] | None = None,
         reviewer_note: str | None = None,
     ) -> tuple[SessionHandle, dict[str, Any]]:
         payload = self.build_payload(
@@ -116,6 +168,7 @@ class ContinuationService:
             prompt_override=prompt_override,
             requires_media=requires_media,
             approval_packet_override=approval_packet_override,
+            approved_action_plan_override=approved_action_plan_override,
             reviewer_note=reviewer_note,
         )
         effective_prompt = prompt_override or source_run["user_message"]

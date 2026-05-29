@@ -455,6 +455,24 @@ _DASHBOARD_HTML = """<!doctype html>
       `;
     }
 
+    function latestSceneContext(run) {
+      const captures = Array.isArray(run.scene_captures) ? run.scene_captures : [];
+      if (!captures.length) return {};
+      const latest = captures[captures.length - 1];
+      return latest.context_json || {};
+    }
+
+    function latestResumeConsistency(run) {
+      const artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
+      for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+        const item = artifacts[index];
+        if (item.artifact_type === 'resume_consistency_check') {
+          return item.content_json || {};
+        }
+      }
+      return {};
+    }
+
     async function refreshDashboard() {
       const summary = await fetchJson('/api/dashboard/summary');
       const scheduler = summary.system_metrics.scheduler || {};
@@ -554,12 +572,22 @@ _DASHBOARD_HTML = """<!doctype html>
     async function loadRunDetail() {
       if (!selectedRunId) return;
       const run = await fetchJson(`/api/runs/${selectedRunId}`);
+      const latestContext = latestSceneContext(run);
+      const latestStructure = latestContext.scene_structure || {};
+      const latestChoiceMemory = latestContext.user_choice_memory || {};
+      const operatorControlState = latestChoiceMemory.operator_control_state || {};
+      const approvedPlan = (run.input_json && run.input_json.approved_action_plan) || {};
+      const resumeConsistency = latestResumeConsistency(run);
       const timings = run.timings_json ? `<pre style="margin-top:12px;">${escapeHtml(formatJson(run.timings_json))}</pre>` : '';
       qs('runMeta').innerHTML = `
         <div class="pill">${run.status}</div>
         <p style="margin-top:10px;"><strong>Prompt:</strong> ${escapeHtml(run.user_message)}</p>
         <p class="muted" style="margin-top:8px;">Route ${run.route_name || 'n/a'} · Stage ${run.current_stage || 'n/a'} · Latency ${run.latency_ms || 'n/a'} ms</p>
         <p class="muted" style="margin-top:8px;">Session ${run.session_id} · Run ${run.id}</p>
+        <p class="muted" style="margin-top:8px;">Workflow ${escapeHtml(latestStructure.workflow_state || 'n/a')} · Transition ${escapeHtml(latestStructure.workflow_transition || 'n/a')} · Operator mode ${escapeHtml(operatorControlState.control_mode || 'n/a')}</p>
+        <p class="muted" style="margin-top:8px;">Attention ${escapeHtml(((latestStructure.attention_targets || []).map((item) => item.label).join(', ')) || 'n/a')}</p>
+        <p class="muted" style="margin-top:8px;">Approved step ${escapeHtml(approvedPlan.current_step || 'n/a')} · Step state ${escapeHtml(approvedPlan.step_state || 'n/a')}</p>
+        <p class="muted" style="margin-top:8px;">Resume consistency ${resumeConsistency.conflict ? 'conflict' : 'ok'}${resumeConsistency.reason ? ' · ' + escapeHtml(resumeConsistency.reason) : ''}</p>
         <pre style="margin-top:12px;">${escapeHtml(run.output_text || 'No final output yet.')}</pre>
         ${timings}
       `;
@@ -581,6 +609,7 @@ _DASHBOARD_HTML = """<!doctype html>
         <div class="item">
           <strong>${item.scene_summary || 'Captured scene'}</strong>
           <div>${item.ocr_text || 'No OCR text recorded'}</div>
+          <div class="muted" style="margin-top:8px;">Workflow ${(item.context_json && item.context_json.scene_structure && item.context_json.scene_structure.workflow_state) || 'n/a'} · Transition ${(item.context_json && item.context_json.scene_structure && item.context_json.scene_structure.workflow_transition) || 'n/a'}</div>
           <small>${item.risk_level || 'unknown risk'} · ${item.created_at}</small>
         </div>
       `, 'No scene captures recorded for this run.');
@@ -588,6 +617,7 @@ _DASHBOARD_HTML = """<!doctype html>
         <div class="item">
           <strong>${item.title}</strong>
           <div>${item.detail}</div>
+          <div class="muted" style="margin-top:8px;">${(item.context_json && item.context_json.feedback_family) ? ('Feedback ' + item.context_json.feedback_family + ' · ' + (item.context_json.feedback_outcome || 'n/a')) : 'No feedback yet'}</div>
           <small>${item.priority} · ${item.status}</small>
           ${renderCardOptions(item)}
         </div>

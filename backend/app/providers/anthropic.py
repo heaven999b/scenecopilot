@@ -213,6 +213,12 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
                 'Return strict JSON with keys {"summary": string, "risk_level": "low"|"medium"|"high", '
                 '"tags": string[], "uncertainty_level": "low"|"medium"|"high", '
                 '"layout_summary": string, '
+                '"workflow_state": string, "workflow_reason": string, "temporal_delta_summary": string, "attention_summary": string, '
+                '"text_layer": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"object_layer": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"hazard_layer": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"attention_targets": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
+                '"state_transitions": string[], '
                 '"primary_entry_points": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
                 '"text_regions": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
                 '"action_controls": [{"label": string, "bbox_x": number, "bbox_y": number, "bbox_w": number, "bbox_h": number}], '
@@ -226,20 +232,40 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
             for idx, raw in enumerate(payload.get("primary_entry_points", []))
             if (item := _coerce_element(raw, element_id=f"entry:{idx}", kind="primary_entry", role="entry_point", fallback_bbox=(0.2, 0.2, 0.6, 0.18))) is not None
         ][:4]
+        text_layer = [
+            item
+            for idx, raw in enumerate(payload.get("text_layer", []))
+            if (item := _coerce_element(raw, element_id=f"text-layer:{idx}", kind="text_layer", role="evidence", fallback_bbox=(0.18, 0.2, 0.64, 0.2))) is not None
+        ][:4]
         text_regions = [
             item
             for idx, raw in enumerate(payload.get("text_regions", []))
             if (item := _coerce_element(raw, element_id=f"text:{idx}", kind="text_region", role="evidence", fallback_bbox=(0.18, 0.2, 0.64, 0.2))) is not None
+        ][:4]
+        object_layer = [
+            item
+            for idx, raw in enumerate(payload.get("object_layer", []))
+            if (item := _coerce_element(raw, element_id=f"object:{idx}", kind="object_cluster", role="workflow_anchor", fallback_bbox=(0.2, 0.4, 0.6, 0.3))) is not None
         ][:4]
         action_controls = [
             item
             for idx, raw in enumerate(payload.get("action_controls", []))
             if (item := _coerce_element(raw, element_id=f"control:{idx}", kind="action_control", role="action_target", fallback_bbox=(0.22, 0.58, 0.56, 0.24))) is not None
         ][:4]
+        hazard_layer = [
+            item
+            for idx, raw in enumerate(payload.get("hazard_layer", []))
+            if (item := _coerce_element(raw, element_id=f"hazard-layer:{idx}", kind="hazard_layer", role="risk_signal", fallback_bbox=(0.14, 0.08, 0.72, 0.16))) is not None
+        ][:4]
         hazard_cues = [
             item
             for idx, raw in enumerate(payload.get("hazard_cues", []))
             if (item := _coerce_element(raw, element_id=f"hazard:{idx}", kind="hazard_cue", role="risk_signal", fallback_bbox=(0.14, 0.08, 0.72, 0.16))) is not None
+        ][:4]
+        attention_targets = [
+            item
+            for idx, raw in enumerate(payload.get("attention_targets", []))
+            if (item := _coerce_element(raw, element_id=f"attention:{idx}", kind="attention_target", role="attention_target", fallback_bbox=(0.18, 0.18, 0.64, 0.24))) is not None
         ][:4]
         evidence_gaps = [
             EvidenceGap(
@@ -257,11 +283,20 @@ class AnthropicVisionProvider(_AnthropicBaseProvider):
             provider=self.name,
             structure=SceneStructure(
                 layout_summary=str(payload.get("layout_summary", "")).strip(),
+                workflow_state=str(payload.get("workflow_state", "observe_context")).strip() or "observe_context",
+                workflow_reason=str(payload.get("workflow_reason", "")).strip(),
+                temporal_delta_summary=str(payload.get("temporal_delta_summary", "")).strip(),
+                attention_summary=str(payload.get("attention_summary", "")).strip(),
+                text_layer=text_layer or text_regions[:2],
+                object_layer=object_layer or action_controls[:2] or primary_entry_points[:2],
+                hazard_layer=hazard_layer or hazard_cues[:2],
+                attention_targets=attention_targets or hazard_layer[:1] or text_layer[:1] or object_layer[:1],
+                state_transitions=[str(item).strip() for item in payload.get("state_transitions", []) if str(item).strip()][:6],
                 primary_entry_points=primary_entry_points,
                 text_regions=text_regions,
                 action_controls=action_controls,
                 hazard_cues=hazard_cues,
-                salient_elements=(text_regions[:1] or action_controls[:1] or primary_entry_points[:1] or hazard_cues[:1]),
+                salient_elements=(attention_targets[:1] or text_regions[:1] or action_controls[:1] or primary_entry_points[:1] or hazard_cues[:1]),
             ),
             uncertainty_level=str(payload.get("uncertainty_level", "medium")).strip().lower() or "medium",
             evidence_gaps=evidence_gaps,
@@ -300,7 +335,7 @@ class AnthropicDecisionProvider(_AnthropicBaseProvider):
                 f"User prompt: {prompt}\n"
                 f"Scene summary: {scene_summary}\n"
                 f"OCR text: {ocr_text}\n"
-                f"Scene structure: {json.dumps({'layout_summary': (scene_structure.layout_summary if scene_structure else ''), 'primary_entry_points': [item.label for item in (scene_structure.primary_entry_points if scene_structure else [])], 'hazard_cues': [item.label for item in (scene_structure.hazard_cues if scene_structure else [])]}, ensure_ascii=True)}\n"
+                f"Scene structure: {json.dumps({'layout_summary': (scene_structure.layout_summary if scene_structure else ''), 'workflow_state': (scene_structure.workflow_state if scene_structure else ''), 'attention_summary': (scene_structure.attention_summary if scene_structure else ''), 'text_layer': [item.label for item in (scene_structure.text_layer if scene_structure else [])], 'object_layer': [item.label for item in (scene_structure.object_layer if scene_structure else [])], 'hazard_layer': [item.label for item in (scene_structure.hazard_layer if scene_structure else [])], 'attention_targets': [item.label for item in (scene_structure.attention_targets if scene_structure else [])]}, ensure_ascii=True)}\n"
                 f"Recent memory: {memory_context}\n"
                 f"Retrieved docs: {json.dumps(docs, ensure_ascii=True)}"
             ),

@@ -88,30 +88,37 @@ def evaluate_clarification_policy(
     ocr_text: str,
     scene_observation: SceneObservation,
     retrieved_document_count: int,
+    operator_control_state: dict | None = None,
 ) -> ClarificationPolicyDecision:
     lower = user_message.lower()
     evidence_gaps = scene_observation.evidence_gaps
+    control_mode = str((operator_control_state or {}).get("control_mode") or "").strip()
+    preferred_options = ["capture_close_up", "view_manual", "not_now"]
+    if control_mode == "evidence_control":
+        preferred_options = ["view_manual", "view_evidence", "capture_close_up"]
+    elif control_mode == "approval_control":
+        preferred_options = ["view_evidence", "capture_close_up", "request_approval"]
     if evidence_gaps and scene_observation.uncertainty_level in {"medium", "high"}:
         top_gap = evidence_gaps[0]
         return ClarificationPolicyDecision(
             required=True,
             reason=top_gap.reason,
             question=top_gap.suggested_follow_up,
-            suggested_options=["capture_close_up", "view_manual", "skip"],
+            suggested_options=preferred_options,
         )
     if any(token in lower for token in ("label", "text", "warning", "expiry", "expiration")) and not ocr_text.strip():
         return ClarificationPolicyDecision(
             required=True,
             reason="The request depends on visible text, but the current OCR evidence is empty.",
             question="I need a clearer close-up of the label or warning text before I can answer confidently. Can you zoom in or retake the frame?",
-            suggested_options=["capture_close_up", "view_manual", "not_now"],
+            suggested_options=preferred_options,
         )
     if retrieved_document_count == 0 and any(token in lower for token in ("safe", "should i", "next step", "can i")):
         return ClarificationPolicyDecision(
             required=True,
             reason="The request is action-oriented, but there is not yet enough grounded evidence to recommend a safe next step.",
             question="I can help once I have a clearer view or a matching SOP. Do you want to retake the frame or open the relevant manual first?",
-            suggested_options=["capture_close_up", "open_manual", "cancel"],
+            suggested_options=["capture_close_up", "open_manual", "cancel"] if control_mode != "evidence_control" else ["open_manual", "view_evidence", "capture_close_up"],
         )
     return ClarificationPolicyDecision(required=False, reason="The current scene evidence is sufficient.")
 
@@ -124,7 +131,10 @@ def classify_risk_taxonomy(
     retrieved_document_count: int,
 ) -> RiskTaxonomyDecision:
     lower = f"{user_message} {scene_observation.summary}".lower()
-    hazard_count = len(scene_observation.structure.hazard_cues)
+    hazard_count = max(
+        len(scene_observation.structure.hazard_cues),
+        len(scene_observation.structure.hazard_layer),
+    )
     if recommendation.risk_level == RiskLevel.HIGH or hazard_count >= 1:
         return RiskTaxonomyDecision(
             risk_level=RiskLevel.HIGH,
@@ -218,7 +228,9 @@ def choose_intervention_policy(
     recommendation: ActionRecommendation,
     clarification: ClarificationPolicyDecision,
     risk_taxonomy: RiskTaxonomyDecision,
+    operator_control_state: dict | None = None,
 ) -> InterventionPolicyDecision:
+    control_mode = str((operator_control_state or {}).get("control_mode") or "").strip()
     if clarification.required:
         return InterventionPolicyDecision(
             intervention_type=InterventionType.ASK_CLARIFICATION,
@@ -236,6 +248,12 @@ def choose_intervention_policy(
             intervention_type=InterventionType.ANSWER,
             show_choice_card=False,
             reason="The request is primarily informational and can be answered directly.",
+        )
+    if control_mode == "defer_control" and risk_taxonomy.risk_level == RiskLevel.LOW:
+        return InterventionPolicyDecision(
+            intervention_type=InterventionType.LIGHTWEIGHT_OFFER,
+            show_choice_card=True,
+            reason="The operator has recently deferred low-risk prompts, so surface a lighter-weight offer instead of a pushy action card.",
         )
     return InterventionPolicyDecision(
         intervention_type=InterventionType.RECOMMEND_ACTION,

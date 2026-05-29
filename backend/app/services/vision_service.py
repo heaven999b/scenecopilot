@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..config import DEMO_USER_ID
-from ..domain.runtime_models import ArtifactType, FrameRef, RiskLevel, SceneObservation
+from ..domain.runtime_models import ArtifactType, FrameRef, RiskLevel, SceneObservation, SceneStructure
 from ..services.artifact_service import artifact_service
 from ..services.audit_service import audit_service
 from .provider_runtime_service import provider_runtime_service
@@ -43,15 +43,7 @@ class VisionService:
                     "risk_level": result.risk_level.value,
                     "tags": result.tags,
                     "uncertainty_level": result.uncertainty_level,
-                    "structure": {
-                        "layout_summary": result.structure.layout_summary,
-                        "primary_entry_points": [asdict(item) for item in result.structure.primary_entry_points],
-                        "text_regions": [asdict(item) for item in result.structure.text_regions],
-                        "action_controls": [asdict(item) for item in result.structure.action_controls],
-                        "hazard_cues": [asdict(item) for item in result.structure.hazard_cues],
-                        "overlays": [asdict(item) for item in result.structure.overlays],
-                        "salient_elements": [asdict(item) for item in result.structure.salient_elements],
-                    },
+                    "structure": asdict(result.structure),
                     "evidence_gaps": [asdict(item) for item in result.evidence_gaps],
                     "provider_attempts": execution.attempts,
                     "fallback_used": execution.fallback_used,
@@ -84,7 +76,7 @@ class VisionService:
                 "risk_level": fallback.risk_level.value,
                 "tags": [],
                 "uncertainty_level": fallback.uncertainty_level,
-                "structure": {"layout_summary": "", "primary_entry_points": [], "text_regions": [], "action_controls": [], "hazard_cues": [], "overlays": [], "salient_elements": []},
+                "structure": asdict(SceneStructure()),
                 "evidence_gaps": [],
                 "provider_attempts": execution.attempts,
                 "fallback_used": True,
